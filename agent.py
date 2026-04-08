@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
 """
 OfficeQA Local Agent
-Orchestrator for answering U.S. Treasury Bulletin questions using Claude.
+Orchestrator for answering U.S. Treasury Bulletin questions using DeepSeek via Dedalus.
 """
 
 import os
 import subprocess
 import re
+import json
 from pathlib import Path
 from dotenv import load_dotenv
-from anthropic import Anthropic
+import openai
 
 load_dotenv()
 
 # Configuration
 CORPUS_DIR = Path("corpus")
 CPI_SCRIPT = Path("cpi.py")
+MODEL = os.getenv("OFFICEQA_MODEL", "deepseek-chat")
+
+# Dedalus setup
+openai.api_key = os.getenv("DEDALUS_API_KEY")
+openai.api_base = os.getenv("DEDALUS_API_BASE", "https://api.dedaluslabs.ai/v1")
 
 # System prompt with domain knowledge
-SYSTEM_PROMPT = """You are an expert orchestrator for answering U.S. Treasury Bulletin questions.
+SYSTEM_PROMPT = """You are an expert orchestrator for answering U.S. Treasury Bulletin questions using DeepSeek.
 
 DOMAIN KNOWLEDGE:
 - Treasury data files in /app/resources/. Page files (*_page_*.txt) have answers.
@@ -45,9 +51,46 @@ Always write your best guess immediately, then refine. Wrong answers get partial
 
 class TreasuryAgent:
     def __init__(self):
-        self.client = Anthropic()
         self.conversation_history = []
         self.corpus_dir = CORPUS_DIR
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "grep_files",
+                    "description": "Search Treasury files for a pattern using grep",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": {"type": "string", "description": "Search pattern"},
+                            "files": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional file names to search in",
+                            },
+                        },
+                        "required": ["pattern"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "python_compute",
+                    "description": "Execute Python code for calculations",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "code": {
+                                "type": "string",
+                                "description": "Python code to execute. Set 'result' variable with the answer.",
+                            }
+                        },
+                        "required": ["code"],
+                    },
+                },
+            },
+        ]
 
     def grep_files(self, pattern: str, files: list = None) -> str:
         """Search Treasury files for a pattern."""
@@ -95,54 +138,53 @@ class TreasuryAgent:
             return f"Unknown tool: {tool_name}"
 
     def answer_question(self, question: str) -> str:
-        """Answer a Treasury question using Claude."""
+        """Answer a Treasury question using DeepSeek."""
         self.conversation_history = []
 
         # Initial user message
         self.conversation_history.append({"role": "user", "content": question})
 
         # Agentic loop
-        for _ in range(10):  # Max 10 iterations
-            response = self.client.messages.create(
-                model="claude-3-5-sonnet-20241022",
-                max_tokens=2000,
-                system=SYSTEM_PROMPT,
-                messages=self.conversation_history,
+        for iteration in range(10):  # Max 10 iterations
+            try:
+                response = openai.ChatCompletion.create(
+                    model=MODEL,
+                    messages=[{"role": "system", "content": SYSTEM_PROMPT}] + self.conversation_history,
+                    tools=self.tools,
+                    tool_choice="auto",
+                    max_tokens=2000,
+                )
+            except Exception as e:
+                return f"Error calling API: {e}"
+
+            # Extract assistant message
+            assistant_message = response.choices[0].message
+            self.conversation_history.append(
+                {
+                    "role": "assistant",
+                    "content": assistant_message.get("content", ""),
+                    "tool_calls": assistant_message.get("tool_calls"),
+                }
             )
 
-            # Check if we have tool use or stop
-            if response.stop_reason == "end_turn":
-                # Extract final answer
-                for block in response.content:
-                    if hasattr(block, "text"):
-                        return block.text
-                return "No answer generated"
+            # Check if done (no tool calls)
+            if not assistant_message.get("tool_calls"):
+                return assistant_message.get("content", "No answer generated")
 
-            # Process tool calls if present
-            assistant_message = {"role": "assistant", "content": response.content}
-            self.conversation_history.append(assistant_message)
-
-            has_tool_calls = False
+            # Process tool calls
             tool_results = []
+            for tool_call in assistant_message.get("tool_calls", []):
+                tool_name = tool_call["function"]["name"]
+                tool_input = json.loads(tool_call["function"]["arguments"])
+                tool_result = self.process_tool_call(tool_name, tool_input)
 
-            for block in response.content:
-                if block.type == "tool_use":
-                    has_tool_calls = True
-                    tool_result = self.process_tool_call(block.name, block.input)
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": tool_result,
-                        }
-                    )
-
-            if not has_tool_calls:
-                # No more tool calls, extract final answer
-                for block in response.content:
-                    if hasattr(block, "text"):
-                        return block.text
-                return "No answer generated"
+                tool_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_call_id": tool_call["id"],
+                        "content": tool_result,
+                    }
+                )
 
             # Add tool results to conversation
             self.conversation_history.append({"role": "user", "content": tool_results})
