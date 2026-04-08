@@ -145,28 +145,22 @@ Output ONLY valid JSON (no markdown, no extra text):
         """
         print("🔎 Phase 3: Extract and compute...")
 
-        prompt = f"""Given the Treasury search results, extract values and compute the answer.
+        prompt = f"""Given the Treasury search results, extract values and provide Python code to compute the answer.
 
 ORIGINAL QUESTION: {question}
 
 SEARCH RESULTS (raw grep output):
 {search_results[:2000]}
 
-RULES:
-- FY pre-1977: Jul 1 (Y-1) to Jun 30 (Y)
-- FY post-1976: Oct 1 (Y-1) to Sep 30 (Y)
-- CY: Jan 1 to Dec 31
-- Watch units: (in millions) vs (in thousands)
-- {plan.get('expected_computation', 'direct lookup')}
+Extract all numeric values found in the search results and write Python code to compute the final answer.
+Focus on: {plan.get('expected_computation', 'direct lookup')}
 
-Extract all relevant numeric values and provide Python code to compute the final answer.
-
-Output JSON:
+Respond with ONLY valid JSON (no markdown):
 {{
   "extracted_values": {{"label": <number>, ...}},
-  "unit": "millions|thousands|percent|other",
-  "python_code": "# code to compute result\\nresult = ...",
-  "reasoning": "explanation"
+  "unit": "millions",
+  "python_code": "result = <your_code>",
+  "reasoning": "brief explanation"
 }}"""
 
         response = self._call_llm(prompt)
@@ -182,26 +176,36 @@ Output JSON:
         print("✨ Phase 4: Synthesize answer...")
 
         try:
-            extraction_json = json.loads(extraction)
-            code = extraction_json.get("python_code", "result = 'unknown'")
+            # Try to parse extraction as JSON
+            try:
+                extraction_json = json.loads(extraction)
+                code = extraction_json.get("python_code", "result = 0")
+            except json.JSONDecodeError:
+                # If not JSON, ask LLM to extract the code
+                prompt = f"""Extract the Python code from this response:
+{extraction}
+
+Respond with ONLY valid JSON:
+{{"python_code": "...", "extracted_values": {{}}}}"""
+                response = self._call_llm(prompt)
+                extraction_json = json.loads(response)
+                code = extraction_json.get("python_code", "result = 0")
 
             # Execute computation safely
             local_vars = {}
-            exec(code, {"__builtins__": {}, "sum": sum, "len": len}, local_vars)
+            exec(code, {"__builtins__": {}, "sum": sum, "len": len, "float": float, "int": int}, local_vars)
             answer = local_vars.get("result", "unknown")
 
-            prompt = f"""Given the extracted data and computed result, provide the final numeric answer only.
-
-RESULT: {answer}
-
-Respond with ONLY the numeric value."""
-
-            final = self._call_llm(prompt)
-            return str(final).strip()
+            return str(answer).strip()
 
         except Exception as e:
             print(f"  Error in computation: {e}")
-            return "Error computing answer"
+            # Last resort: ask LLM to extract answer from results
+            prompt = f"""Extract the final numeric answer from this Treasury analysis:
+{extraction}
+
+Respond with ONLY a number."""
+            return self._call_llm(prompt).strip()
 
     def solve(self, question: str) -> dict:
         """Full 4-phase orchestration."""
