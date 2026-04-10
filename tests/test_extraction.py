@@ -6,6 +6,7 @@ monthly pre-extraction, and CY row filtering."""
 from unittest.mock import MagicMock, patch
 
 from extract import (
+    _detect_month_index,
     build_context_from_entries,
     clean_value,
     filter_cy_rows,
@@ -535,7 +536,7 @@ def _make_table_entry(table_id: int = 42) -> dict:
 
 def test_fast_path_all_resolve_annual():
     """When all data_requests resolve deterministically, fast-path returns
-    extractions dict without calling the LLM."""
+    (resolved_extractions, []) tuple without calling the LLM."""
     from solve import _try_deterministic_fast_path
 
     spec = _make_annual_spec()
@@ -558,17 +559,18 @@ def test_fast_path_all_resolve_annual():
         }
         result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
 
-    assert result is not None
-    assert "extractions" in result
-    assert result["extractions"]["v1"]["values"] == [1580.0]
-    assert result["extractions"]["v1"]["confidence"] == "deterministic"
+    resolved, unresolved_ids = result
+    assert "v1" in resolved
+    assert resolved["v1"]["values"] == [1580.0]
+    assert resolved["v1"]["confidence"] == "deterministic"
+    assert unresolved_ids == []
     # LLM was NOT called — resolve_cells was the only function invoked
     mock_resolve.assert_called_once()
 
 
 def test_fast_path_partial_resolve_falls_back():
-    """When resolve_cells returns None for any value, fast-path returns None
-    and the caller should fall back to LLM extraction."""
+    """When resolve_cells returns None for any value, that DR is marked
+    unresolved and the caller should fall back to LLM extraction for it."""
     from solve import _try_deterministic_fast_path
 
     spec = _make_annual_spec()
@@ -589,13 +591,15 @@ def test_fast_path_partial_resolve_falls_back():
         }
         result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
 
-    # Fast-path should fail (None), falling back to LLM
-    assert result is None
+    # Fast-path should mark v1 as unresolved
+    resolved, unresolved_ids = result
+    assert "v1" not in resolved
+    assert "v1" in unresolved_ids
 
 
 def test_fast_path_external_source_graceful():
-    """When a data_request has source='external', fast-path skips it
-    and returns None (not a crash)."""
+    """When a data_request has source='external', fast-path marks it unresolved
+    (not a crash)."""
     from solve import _try_deterministic_fast_path
 
     spec = _make_annual_spec()
@@ -605,12 +609,14 @@ def test_fast_path_external_source_graceful():
     per_dr = {"v1": entries}
 
     result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
-    # Should return None gracefully, not raise
-    assert result is None
+    # Should return (empty, ["v1"]) gracefully, not raise
+    resolved, unresolved_ids = result
+    assert "v1" not in resolved
+    assert "v1" in unresolved_ids
 
 
 def test_fast_path_cpi_source_skipped():
-    """When a data_request has source='cpi', fast-path skips it."""
+    """When a data_request has source='cpi', fast-path marks it unresolved."""
     from solve import _try_deterministic_fast_path
 
     spec = _make_annual_spec()
@@ -619,22 +625,26 @@ def test_fast_path_cpi_source_skipped():
     per_dr = {"v1": entries}
 
     result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
-    assert result is None
+    resolved, unresolved_ids = result
+    assert "v1" not in resolved
+    assert "v1" in unresolved_ids
 
 
 def test_fast_path_no_retrieved_entries():
-    """When per_dr_entries has no entries for a DR, fast-path returns None."""
+    """When per_dr_entries has no entries for a DR, it's marked unresolved."""
     from solve import _try_deterministic_fast_path
 
     spec = _make_annual_spec()
     per_dr = {"v1": []}  # empty entries
 
     result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
-    assert result is None
+    resolved, unresolved_ids = result
+    assert "v1" not in resolved
+    assert "v1" in unresolved_ids
 
 
 def test_fast_path_no_table_entries_only_pf():
-    """When only prose/footnote entries exist (no table entries), fast-path returns None."""
+    """When only prose/footnote entries exist (no table entries), DR is marked unresolved."""
     from solve import _try_deterministic_fast_path
 
     spec = _make_annual_spec()
@@ -654,11 +664,13 @@ def test_fast_path_no_table_entries_only_pf():
     per_dr = {"v1": [pf_entry]}
 
     result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
-    assert result is None
+    resolved, unresolved_ids = result
+    assert "v1" not in resolved
+    assert "v1" in unresolved_ids
 
 
 def test_fast_path_table_id_not_found():
-    """When the table_id can't be resolved from the entry, fast-path returns None."""
+    """When the table_id can't be resolved from the entry, DR is marked unresolved."""
     from solve import _try_deterministic_fast_path
 
     spec = _make_annual_spec()
@@ -668,11 +680,13 @@ def test_fast_path_table_id_not_found():
     with patch("solve._get_table_id_from_entry", return_value=None):
         result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
 
-    assert result is None
+    resolved, unresolved_ids = result
+    assert "v1" not in resolved
+    assert "v1" in unresolved_ids
 
 
 def test_fast_path_cant_build_cells():
-    """When _build_cells_for_dr returns None (unsupported granularity), fast-path returns None."""
+    """When _build_cells_for_dr returns None (unsupported granularity), DR is marked unresolved."""
     from solve import _try_deterministic_fast_path
 
     spec = _make_annual_spec()
@@ -685,12 +699,14 @@ def test_fast_path_cant_build_cells():
     ):
         result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
 
-    assert result is None
+    resolved, unresolved_ids = result
+    assert "v1" not in resolved
+    assert "v1" in unresolved_ids
 
 
 def test_fast_path_multi_dr_all_resolve():
     """When multiple data_requests all resolve, fast-path returns extractions
-    for all DRs."""
+    for all DRs with empty unresolved list."""
     from solve import _try_deterministic_fast_path
 
     spec = _make_multi_dr_spec()
@@ -713,14 +729,15 @@ def test_fast_path_multi_dr_all_resolve():
         ]
         result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
 
-    assert result is not None
-    assert result["extractions"]["v1"]["values"] == [1200.0]
-    assert result["extractions"]["v2"]["values"] == [1580.0]
+    resolved, unresolved_ids = result
+    assert resolved["v1"]["values"] == [1200.0]
+    assert resolved["v2"]["values"] == [1580.0]
+    assert unresolved_ids == []
 
 
 def test_fast_path_multi_dr_partial_fails():
-    """When one of two data_requests fails to resolve, fast-path returns None
-    (falls back to full LLM extraction for all DRs)."""
+    """When one of two data_requests fails to resolve, v1 is in resolved
+    and v2 is in unresolved_ids (partial result)."""
     from solve import _try_deterministic_fast_path
 
     spec = _make_multi_dr_spec()
@@ -743,8 +760,11 @@ def test_fast_path_multi_dr_partial_fails():
         ]
         result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
 
-    # Fast-path should fail because v2 didn't resolve
-    assert result is None
+    # v1 should be resolved, v2 should be unresolved
+    resolved, unresolved_ids = result
+    assert "v1" in resolved
+    assert resolved["v1"]["values"] == [1200.0]
+    assert "v2" in unresolved_ids
 
 
 def test_fast_path_monthly_all_resolve():
@@ -770,14 +790,15 @@ def test_fast_path_monthly_all_resolve():
         mock_resolve.return_value = {"values": monthly_values, "debug": {}}
         result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
 
-    assert result is not None
-    assert len(result["extractions"]["v1"]["values"]) == 12
-    assert result["extractions"]["v1"]["values"][0] == 100.0  # Jan
-    assert result["extractions"]["v1"]["values"][11] == 1200.0  # Dec
+    resolved, unresolved_ids = result
+    assert len(resolved["v1"]["values"]) == 12
+    assert resolved["v1"]["values"][0] == 100.0  # Jan
+    assert resolved["v1"]["values"][11] == 1200.0  # Dec
+    assert unresolved_ids == []
 
 
 def test_fast_path_monthly_incomplete_fails():
-    """When monthly_all DR resolves fewer than 12 values, fast-path returns None."""
+    """When monthly_all DR resolves fewer than 12 values, it's marked unresolved."""
     from solve import _try_deterministic_fast_path
 
     spec = _make_monthly_spec()
@@ -799,8 +820,10 @@ def test_fast_path_monthly_incomplete_fails():
         mock_resolve.return_value = {"values": incomplete_values, "debug": {}}
         result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
 
-    # Should fail because we don't have 12 values
-    assert result is None
+    # Should mark v1 as unresolved because we don't have 12 values
+    resolved, unresolved_ids = result
+    assert "v1" not in resolved
+    assert "v1" in unresolved_ids
 
 
 def test_fast_path_values_format_matches_llm_extraction():
@@ -855,11 +878,13 @@ def test_fast_path_monthly_values_format_matches_compute():
 
 
 def test_fast_path_empty_spec():
-    """Fast-path returns None when spec has no data_requests."""
+    """Fast-path returns ({}, []) when spec has no data_requests."""
     from solve import _try_deterministic_fast_path
 
     result = _try_deterministic_fast_path({}, {}, verbose=True)
-    assert result is None
+    resolved, unresolved_ids = result
+    assert resolved == {}
+    assert unresolved_ids == []
 
 
 def test_fast_path_logging_on_success(capsys):
@@ -924,8 +949,8 @@ def test_fast_path_with_run_extract_and_compute():
         patch("solve.compute_execute", return_value=1580.0) as mock_compute,
         patch("solve.format_result", return_value="1580"),
     ):
-        mock_fp.return_value = {
-            "extractions": {
+        mock_fp.return_value = (
+            {
                 "v1": {
                     "values": [1580.0],
                     "labels": ["National defense"],
@@ -933,8 +958,8 @@ def test_fast_path_with_run_extract_and_compute():
                     "confidence": "deterministic",
                 }
             },
-            "notes": "v1: resolved deterministically",
-        }
+            [],  # no unresolved DRs
+        )
         answer, extraction = _run_extract_and_compute(spec, per_dr, "test question", verbose=True)
 
     # Fast-path was attempted
@@ -947,7 +972,7 @@ def test_fast_path_with_run_extract_and_compute():
 
 
 def test_fast_path_fallback_to_llm():
-    """_run_extract_and_compute falls back to LLM when fast-path returns None."""
+    """_run_extract_and_compute falls back to LLM when fast-path has unresolved DRs."""
     from solve import _run_extract_and_compute
 
     spec = _make_annual_spec()
@@ -955,12 +980,13 @@ def test_fast_path_fallback_to_llm():
     per_dr = {"v1": entries}
 
     with (
-        patch("solve._try_deterministic_fast_path", return_value=None) as mock_fp,
+        patch("solve._try_deterministic_fast_path") as mock_fp,
         patch("solve.extract_structured") as mock_llm,
         patch("solve.validate_extractions", return_value=[]),
         patch("solve.compute_execute", return_value=1580.0),
         patch("solve.format_result", return_value="1580"),
     ):
+        mock_fp.return_value = ({}, ["v1"])  # v1 unresolved
         mock_llm.return_value = {
             "extractions": {
                 "v1": {
@@ -1444,3 +1470,332 @@ def test_extract_structured_no_filtering_for_annual():
     user_msg = messages[-1]["content"]
     # The "1940" annual row should still be in the context
     assert "1940" in user_msg
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Month detection false positive fix (scrutiny bug 1)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_detect_month_index_rejects_marketable_securities():
+    """'Marketable securities' must NOT be detected as March (mar)."""
+    assert _detect_month_index("Marketable securities") is None
+
+
+def test_detect_month_index_rejects_marchioness():
+    """'Marchioness' starts with 'mar' but is not a month — must be rejected."""
+    assert _detect_month_index("Marchioness") is None
+
+
+def test_detect_month_index_rejects_martial():
+    """'Martial' starts with 'mar' but is not a month — must be rejected."""
+    assert _detect_month_index("Martial") is None
+
+
+def test_detect_month_index_rejects_octane():
+    """'Octane' starts with 'oct' but is not a month — must be rejected."""
+    assert _detect_month_index("Octane") is None
+
+
+def test_detect_month_index_rejects_mayor():
+    """'Mayor' starts with 'may' but is not a month — must be rejected."""
+    assert _detect_month_index("Mayor") is None
+
+
+def test_detect_month_index_accepts_mar_dot():
+    """'Mar.' with period is a valid month abbreviation (March)."""
+    assert _detect_month_index("Mar.") == 3
+
+
+def test_detect_month_index_accepts_march():
+    """'March' is a valid month name."""
+    assert _detect_month_index("March") == 3
+
+
+def test_detect_month_index_accepts_mar_space():
+    """'Mar ' (with trailing space) is a valid month prefix."""
+    # After strip().lower() → 'mar', which is a direct dict match
+    assert _detect_month_index("Mar ") == 3
+
+
+def test_detect_month_index_accepts_mar_with_year():
+    """'Mar. 1940' or 'Mar. > 1940' should still match as March."""
+    assert _detect_month_index("Mar. 1940") == 3
+    assert _detect_month_index("Mar. > 1940") == 3
+
+
+def test_detect_month_index_accepts_jan_with_suffix():
+    """'Jan.' and 'January' and 'Jan' all work."""
+    assert _detect_month_index("Jan.") == 1
+    assert _detect_month_index("January") == 1
+    assert _detect_month_index("Jan") == 1
+
+
+def test_detect_month_index_accepts_oct_with_suffix():
+    """'Oct.' and 'October' and 'Oct' all work."""
+    assert _detect_month_index("Oct.") == 10
+    assert _detect_month_index("October") == 10
+    assert _detect_month_index("Oct") == 10
+
+
+def test_detect_month_index_accepts_may_standalone():
+    """'May' as a standalone word is a valid month."""
+    assert _detect_month_index("May") == 5
+
+
+def test_detect_month_index_rejects_non_month():
+    """Non-month strings return None."""
+    assert _detect_month_index("Total") is None
+    assert _detect_month_index("1940") is None
+    assert _detect_month_index("Defense") is None
+
+
+def test_detect_month_index_rejects_market():
+    """'Market' starts with 'mar' but is not a month."""
+    assert _detect_month_index("Market") is None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Partial deterministic fast-path (scrutiny bug 2 — VAL-EXTR-003)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_fast_path_partial_returns_resolved_and_unresolved():
+    """When one DR resolves and another doesn't, fast-path returns partial
+    results (resolved dict + unresolved list) instead of None."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_multi_dr_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries, "v2": entries}
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("solve._build_cells_for_dr") as mock_build,
+        patch("solve.resolve_cells") as mock_resolve,
+    ):
+        mock_build.side_effect = [
+            [{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
+            [{"row_leaf": "National defense", "col_leaf": "1940", "name": "v2"}],
+        ]
+        # v1 resolves, v2 doesn't
+        mock_resolve.side_effect = [
+            {"values": {"v1": 1200.0}, "debug": {}},
+            {"values": {"v2": None}, "debug": {"v2": {"status": "label_miss"}}},
+        ]
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    # Should return partial results, not None
+    assert result is not None
+    resolved, unresolved_ids = result
+    assert "v1" in resolved
+    assert resolved["v1"]["values"] == [1200.0]
+    assert "v2" in unresolved_ids
+
+
+def test_fast_path_partial_external_source_dr():
+    """When a DR has source='external', it becomes unresolved but other DRs
+    are still resolved."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_multi_dr_spec()
+    spec["data_requests"][1]["source"] = "external"  # v2 is external
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries, "v2": entries}
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch(
+            "solve._build_cells_for_dr",
+            return_value=[{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
+        ),
+        patch("solve.resolve_cells") as mock_resolve,
+    ):
+        mock_resolve.return_value = {
+            "values": {"v1": 1200.0},
+            "debug": {},
+        }
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    assert result is not None
+    resolved, unresolved_ids = result
+    assert "v1" in resolved
+    assert "v2" in unresolved_ids
+
+
+def test_fast_path_partial_no_entries_for_one_dr():
+    """When one DR has no retrieved entries, it becomes unresolved."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_multi_dr_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries, "v2": []}  # v2 has no entries
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch(
+            "solve._build_cells_for_dr",
+            return_value=[{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
+        ),
+        patch("solve.resolve_cells") as mock_resolve,
+    ):
+        mock_resolve.return_value = {
+            "values": {"v1": 1200.0},
+            "debug": {},
+        }
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    assert result is not None
+    resolved, unresolved_ids = result
+    assert "v1" in resolved
+    assert "v2" in unresolved_ids
+
+
+def test_fast_path_all_resolve_returns_empty_unresolved():
+    """When all DRs resolve, unresolved list is empty."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_multi_dr_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries, "v2": entries}
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("solve._build_cells_for_dr") as mock_build,
+        patch("solve.resolve_cells") as mock_resolve,
+    ):
+        mock_build.side_effect = [
+            [{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
+            [{"row_leaf": "National defense", "col_leaf": "1940", "name": "v2"}],
+        ]
+        mock_resolve.side_effect = [
+            {"values": {"v1": 1200.0}, "debug": {}},
+            {"values": {"v2": 1580.0}, "debug": {}},
+        ]
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    assert result is not None
+    resolved, unresolved_ids = result
+    assert "v1" in resolved
+    assert "v2" in resolved
+    assert unresolved_ids == []
+
+
+def test_fast_path_all_fail_returns_empty_resolved():
+    """When all DRs fail, resolved dict is empty and all are unresolved."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_multi_dr_spec()
+    per_dr = {"v1": [], "v2": []}
+
+    result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    assert result is not None
+    resolved, unresolved_ids = result
+    assert resolved == {}
+    assert "v1" in unresolved_ids
+    assert "v2" in unresolved_ids
+
+
+def test_fast_path_empty_spec_returns_empty():
+    """Empty spec returns empty resolved and empty unresolved."""
+    from solve import _try_deterministic_fast_path
+
+    result = _try_deterministic_fast_path({}, {}, verbose=True)
+
+    assert result is not None
+    resolved, unresolved_ids = result
+    assert resolved == {}
+    assert unresolved_ids == []
+
+
+def test_run_extract_and_compute_merges_partial_fast_path():
+    """_run_extract_and_compute merges deterministic results with LLM fallback
+    for only the unresolved DRs."""
+    from solve import _run_extract_and_compute
+
+    spec = _make_multi_dr_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries, "v2": entries}
+
+    # Fast-path resolves v1 but not v2
+    fast_result = (
+        {
+            "v1": {
+                "values": [1200.0],
+                "labels": ["National defense"],
+                "source_file": "test.json",
+                "confidence": "deterministic",
+            }
+        },
+        ["v2"],
+    )
+
+    # LLM extraction resolves v2
+    llm_extraction = {
+        "extractions": {
+            "v2": {
+                "values": [1580.0],
+                "labels": ["National defense"],
+                "source_file": "test.json",
+                "confidence": "high",
+            }
+        },
+        "notes": "LLM fallback for v2",
+    }
+
+    with (
+        patch("solve._try_deterministic_fast_path", return_value=fast_result) as mock_fp,
+        patch("solve.extract_structured") as mock_llm,
+        patch("solve.validate_extractions", return_value=[]),
+        patch("solve.compute_execute", return_value=31.67) as mock_compute,
+        patch("solve.format_result", return_value="31.67"),
+    ):
+        mock_llm.return_value = llm_extraction
+        answer, extraction = _run_extract_and_compute(spec, per_dr, "test question", verbose=True)
+
+    # Fast-path was attempted
+    mock_fp.assert_called_once()
+    # LLM extract was called (for unresolved v2)
+    mock_llm.assert_called_once()
+    # Compute should receive merged extractions (v1 from fast-path, v2 from LLM)
+    compute_arg = mock_compute.call_args[0][1]
+    assert "v1" in compute_arg
+    assert "v2" in compute_arg
+    assert compute_arg["v1"]["confidence"] == "deterministic"
+    assert compute_arg["v2"]["confidence"] == "high"
+
+
+def test_run_extract_and_compute_skips_llm_when_all_resolved():
+    """When all DRs resolve deterministically, LLM extraction is still called
+    but only for the (empty) unresolved list — effectively a no-op."""
+    from solve import _run_extract_and_compute
+
+    spec = _make_annual_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    fast_result = (
+        {
+            "v1": {
+                "values": [1580.0],
+                "labels": ["National defense"],
+                "source_file": "test.json",
+                "confidence": "deterministic",
+            }
+        },
+        [],  # no unresolved DRs
+    )
+
+    with (
+        patch("solve._try_deterministic_fast_path", return_value=fast_result),
+        patch("solve.extract_structured") as mock_llm,
+        patch("solve.validate_extractions", return_value=[]),
+        patch("solve.compute_execute", return_value=1580.0),
+        patch("solve.format_result", return_value="1580"),
+    ):
+        answer, extraction = _run_extract_and_compute(spec, per_dr, "test question", verbose=True)
+
+    # LLM should NOT be called when there are no unresolved DRs
+    mock_llm.assert_not_called()
+    assert answer == "1580"

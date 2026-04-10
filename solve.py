@@ -174,18 +174,23 @@ def _build_cells_for_dr(dr: dict, table_id: int) -> list[dict] | None:
 
 def _try_deterministic_fast_path(
     spec: dict, per_dr_entries: dict, verbose: bool = False
-) -> dict | None:
-    """Try to resolve all data_requests deterministically via resolve_cells().
+) -> tuple[dict[str, dict], list[str]]:
+    """Try to resolve data_requests deterministically via resolve_cells().
 
-    Returns an extractions dict matching extract_structured() output if ALL
-    data_requests resolve successfully, or None if any DR can't be resolved.
-    The caller should fall back to normal LLM extraction when this returns None.
+    Returns a tuple of (resolved_extractions, unresolved_dr_ids).
+    - resolved_extractions: dict mapping dr_id → extraction dict (same structure
+      as extract_structured() output per-DR entries) for DRs that resolved.
+    - unresolved_dr_ids: list of dr_ids that could NOT be resolved.
+
+    The caller should merge resolved_extractions with LLM fallback for the
+    unresolved DRs. When unresolved_dr_ids is empty, LLM extraction is skipped.
     """
     data_requests = spec.get("data_requests") or []
     if not data_requests:
-        return None
+        return {}, []
 
     extractions: dict[str, dict] = {}
+    unresolved_ids: list[str] = []
     notes_parts: list[str] = []
 
     for dr in data_requests:
@@ -196,14 +201,16 @@ def _try_deterministic_fast_path(
         if source in ("external", "cpi", "fx"):
             if verbose:
                 print(f"  Fast-path: {dr_id} skipped (source={source})")
-            return None
+            unresolved_ids.append(dr_id)
+            continue
 
         # Get the first (best) retrieved entry for this DR
         entries = per_dr_entries.get(dr_id) or []
         if not entries:
             if verbose:
                 print(f"  Fast-path: {dr_id} no retrieved entries")
-            return None
+            unresolved_ids.append(dr_id)
+            continue
 
         # Find a table entry (skip prose/footnote entries which have 'content')
         table_entry = None
@@ -217,14 +224,16 @@ def _try_deterministic_fast_path(
         if table_entry is None:
             if verbose:
                 print(f"  Fast-path: {dr_id} no table entries")
-            return None
+            unresolved_ids.append(dr_id)
+            continue
 
         # Look up table_id from the entry
         table_id = _get_table_id_from_entry(table_entry)
         if table_id is None:
             if verbose:
                 print(f"  Fast-path: {dr_id} table_id not found")
-            return None
+            unresolved_ids.append(dr_id)
+            continue
 
         # Build cell specs for resolve_cells()
         cells = _build_cells_for_dr(dr, table_id)
@@ -233,7 +242,8 @@ def _try_deterministic_fast_path(
                 print(
                     f"  Fast-path: {dr_id} can't build cells (granularity={dr.get('granularity')})"
                 )
-            return None
+            unresolved_ids.append(dr_id)
+            continue
 
         # Call resolve_cells
         try:
@@ -241,16 +251,18 @@ def _try_deterministic_fast_path(
         except Exception as e:
             if verbose:
                 print(f"  Fast-path: {dr_id} resolve_cells error: {e}")
-            return None
+            unresolved_ids.append(dr_id)
+            continue
 
         values = resolved.get("values", {})
 
         # Check if all values resolved (non-None)
-        unresolved = [k for k, v in values.items() if v is None]
-        if unresolved:
+        unresolved_cells = [k for k, v in values.items() if v is None]
+        if unresolved_cells:
             if verbose:
-                print(f"  Fast-path: {dr_id} unresolved cells: {unresolved}")
-            return None
+                print(f"  Fast-path: {dr_id} unresolved cells: {unresolved_cells}")
+            unresolved_ids.append(dr_id)
+            continue
 
         # Convert resolved values to extraction format
         granularity = dr.get("granularity", "annual")
@@ -265,10 +277,20 @@ def _try_deterministic_fast_path(
                     ordered_values.append(values[name])
                     ordered_labels.append(f"month {m}")
                 else:
-                    # Missing month — fast-path fails
+                    # Missing month — this DR is unresolved
                     if verbose:
                         print(f"  Fast-path: {dr_id} incomplete monthly ({len(ordered_values)}/12)")
-                    return None
+                    unresolved_ids.append(dr_id)
+                    break
+            else:
+                # All 12 months resolved
+                extractions[dr_id] = {
+                    "values": ordered_values,
+                    "labels": ordered_labels,
+                    "source_file": table_entry.get("file", ""),
+                    "confidence": "deterministic",
+                }
+                notes_parts.append(f"{dr_id}: resolved deterministically from table {table_id}")
         elif granularity == "multi_year_annual":
             dr_years = dr.get("years") or []
             ordered_values = []
@@ -281,33 +303,46 @@ def _try_deterministic_fast_path(
                 else:
                     if verbose:
                         print(f"  Fast-path: {dr_id} incomplete multi-year values")
-                    return None
+                    unresolved_ids.append(dr_id)
+                    break
+            else:
+                # All years resolved
+                extractions[dr_id] = {
+                    "values": ordered_values,
+                    "labels": ordered_labels,
+                    "source_file": table_entry.get("file", ""),
+                    "confidence": "deterministic",
+                }
+                notes_parts.append(f"{dr_id}: resolved deterministically from table {table_id}")
         else:
             # Single value
             val = values.get(dr_id)
             if val is None:
                 if verbose:
                     print(f"  Fast-path: {dr_id} single value is None")
-                return None
-            ordered_values = [val]
-            ordered_labels = [dr.get("row_hint", "")]
+                unresolved_ids.append(dr_id)
+                continue
+            extractions[dr_id] = {
+                "values": [val],
+                "labels": [dr.get("row_hint", "")],
+                "source_file": table_entry.get("file", ""),
+                "confidence": "deterministic",
+            }
+            notes_parts.append(f"{dr_id}: resolved deterministically from table {table_id}")
 
-        extractions[dr_id] = {
-            "values": ordered_values,
-            "labels": ordered_labels,
-            "source_file": table_entry.get("file", ""),
-            "confidence": "deterministic",
-        }
-        notes_parts.append(f"{dr_id}: resolved deterministically from table {table_id}")
-
+    n_resolved = len(extractions)
+    n_unresolved = len(unresolved_ids)
     if verbose:
         n = len(data_requests)
-        print(f"  Fast-path: ALL {n} DR{'' if n == 1 else 's'} resolved deterministically ✓")
+        if n_unresolved == 0:
+            print(f"  Fast-path: ALL {n} DR{'' if n == 1 else 's'} resolved deterministically ✓")
+        else:
+            print(
+                f"  Fast-path: {n_resolved}/{n} DR{'' if n == 1 else 's'} resolved, "
+                f"{n_unresolved} need LLM fallback: {unresolved_ids}"
+            )
 
-    return {
-        "extractions": extractions,
-        "notes": "; ".join(notes_parts),
-    }
+    return extractions, unresolved_ids
 
 
 def llm(system: str, user: str, max_tokens: int = 1000, temperature: float = 0.0) -> str:
@@ -726,28 +761,55 @@ def _run_extract_and_compute(
     returned so the caller can hand it to verify.
 
     Tries the deterministic fast-path first: resolve_cells() from find.py
-    attempts to look up values directly from the ledger without LLM. If ALL
-    data_requests resolve, the LLM extract step is skipped entirely. If ANY
-    data_request can't be resolved, falls back to normal LLM extraction.
+    attempts to look up values directly from the ledger without LLM. Resolved
+    DRs are used directly; unresolved DRs fall through to LLM extraction.
+    When all DRs resolve deterministically, the LLM extract step is skipped.
     """
     # ── Deterministic fast-path ─────────────────────────────────────────
-    fast_extraction = _try_deterministic_fast_path(spec, per_dr_entries, verbose=verbose)
-    if fast_extraction is not None:
+    resolved_extractions, unresolved_ids = _try_deterministic_fast_path(
+        spec, per_dr_entries, verbose=verbose
+    )
+
+    if not unresolved_ids:
         # All DRs resolved deterministically — skip LLM extraction
         if verbose:
             print("  Fast-path succeeded — skipping LLM extraction")
-        extraction = fast_extraction
+        extraction: dict | None = {"extractions": resolved_extractions, "notes": "deterministic"}
     else:
-        # Fast-path missed — fall back to LLM extraction
-        if verbose:
-            print("  Fast-path missed — falling back to LLM extraction")
-        extraction = extract_structured(
-            spec,
-            per_dr_entries,
+        # Some or all DRs need LLM fallback
+        if resolved_extractions:
+            if verbose:
+                print(
+                    f"  Fast-path partial: {len(resolved_extractions)} resolved, "
+                    f"{len(unresolved_ids)} need LLM fallback"
+                )
+        else:
+            if verbose:
+                print("  Fast-path missed — falling back to LLM extraction")
+
+        # Filter spec to only unresolved DRs for LLM extraction
+        data_requests = spec.get("data_requests") or []
+        unresolved_drs = [dr for dr in data_requests if dr.get("id") in unresolved_ids]
+        filtered_spec = {**spec, "data_requests": unresolved_drs}
+        # Filter per_dr_entries to only unresolved DRs
+        filtered_per_dr = {k: v for k, v in per_dr_entries.items() if k in unresolved_ids}
+
+        llm_extraction = extract_structured(
+            filtered_spec,
+            filtered_per_dr,
             question,
             verbose=verbose,
             feedback=feedback,
         )
+
+        # Merge: deterministic results + LLM results
+        merged_extractions = dict(resolved_extractions)  # copy deterministic
+        if llm_extraction and "extractions" in llm_extraction:
+            merged_extractions.update(llm_extraction["extractions"])
+        extraction = {
+            "extractions": merged_extractions,
+            "notes": llm_extraction.get("notes", "") if llm_extraction else "",
+        }
 
     if extraction is None or "extractions" not in extraction:
         return "EXTRACT_FAILED", None

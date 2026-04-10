@@ -177,6 +177,7 @@ def _detect_month_index(col_header: str) -> int | None:
 
     Returns 1–12 if the header is a month name, None otherwise.
     Handles variants like 'Jan.', 'Jan', 'January'.
+    Rejects false positives like 'Marketable securities' (starts with 'mar').
     """
     h = col_header.strip().lower()
     # Direct month name match
@@ -185,7 +186,11 @@ def _detect_month_index(col_header: str) -> int | None:
     # Check if header starts with a month name (e.g., "Jan. > 1940")
     for month_name, idx in _CALENDAR_MONTHS.items():
         if h.startswith(month_name):
-            return idx
+            # Verify the next character is NOT alphabetic (prevents
+            # 'Marketable securities' matching 'mar', 'Octane' matching 'oct', etc.)
+            next_pos = len(month_name)
+            if next_pos >= len(h) or not h[next_pos].isalpha():
+                return idx
     return None
 
 

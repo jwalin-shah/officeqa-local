@@ -27,9 +27,9 @@
     "total_questions": 246
   },
   "oracle_extraction": {
-    "accuracy": 35.0,
-    "n": 20,
-    "note": "Legacy extract_answer() path; unit conversion in format_result() does not affect this metric"
+    "accuracy": 28.0,
+    "n": 50,
+    "note": "Post-extraction-scrutiny-fixes eval with n=50; month detection false positive fix + partial deterministic fast-path"
   },
   "unit_conversion": {
     "parse_unit_coverage": "millions, thousands, billions, percent",
