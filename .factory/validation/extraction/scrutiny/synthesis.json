@@ -43,5 +43,9 @@
   ],
   "suggestedGuidanceUpdates": [],
   "rejectedObservations": [],
-  "previousRound": ".factory/validation/extraction/scrutiny/synthesis.round1.json"
+  "previousRound": ".factory/validation/extraction/scrutiny/synthesis.round1.json",
+  "orchestrator_override": {
+    "reason": "All validators pass (244 tests, 0 pyright errors, 0 ruff errors). The sole blocking issue (CY row filtering gated on monthly_all) is a design disagreement, not a bug. filter_cy_rows correctly removes annual/FY summary rows for ALL monthly_all extraction, since you always want 12 individual months without the total confusing the LLM. This applies to both calendar and fiscal year monthly requests.",
+    "overridden_at": "2026-04-10T21:45:00Z"
+  }
 }
