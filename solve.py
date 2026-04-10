@@ -937,7 +937,27 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
             print(f"  Answer: {answer}")
         return answer
 
-    verdict = verify_answer(question, spec, extraction["extractions"], answer, verbose=verbose)
+    # Determine source unit from retrieval entries for auto-fix
+    source_unit = _determine_source_unit(per_dr)
+    verdict = verify_answer(
+        question,
+        spec,
+        extraction["extractions"],
+        answer,
+        verbose=verbose,
+        source_unit=source_unit,
+    )
+
+    # Auto-fix: if unit correction was applied, use the corrected answer directly
+    corrected = verdict.get("corrected_answer")
+    if corrected and not verdict.get("ok"):
+        if verbose:
+            print(f"  Auto-fix applied unit correction: {answer} → {corrected}")
+        answer = corrected
+        if verbose:
+            print(f"  Answer: {answer}")
+        return answer
+
     if verdict.get("ok"):
         if verbose:
             print(f"  Answer: {answer}")
