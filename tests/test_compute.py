@@ -1,8 +1,15 @@
-"""Tests for compute.py — execute(), format_result(), sandbox security."""
+"""Tests for compute.py — execute(), format_result(), sandbox security, unit conversion."""
 
 import pytest
 
-from compute import ComputeError, execute, format_result, validate_extractions
+from compute import (
+    ComputeError,
+    convert_unit,
+    execute,
+    format_result,
+    parse_unit,
+    validate_extractions,
+)
 
 # ── execute() happy paths ────────────────────────────────────────────────────
 
@@ -244,3 +251,150 @@ def test_validate_extractions_ok():
     extractions = {"v1": {"values": [1, 2, 3]}}
     warnings = validate_extractions(spec, extractions)
     assert warnings == []
+
+
+# ── parse_unit() ─────────────────────────────────────────────────────────────
+
+
+def test_parse_unit_millions():
+    assert parse_unit("In millions of dollars") == "millions"
+    assert parse_unit("In millions") == "millions"
+    assert parse_unit("Millions of dollars") == "millions"
+    assert parse_unit("millions") == "millions"
+
+
+def test_parse_unit_thousands():
+    assert parse_unit("In thousands of dollars") == "thousands"
+    assert parse_unit("In thousands") == "thousands"
+    assert parse_unit("Thousands") == "thousands"
+    assert parse_unit("thousands") == "thousands"
+
+
+def test_parse_unit_billions():
+    assert parse_unit("In billions of dollars") == "billions"
+    assert parse_unit("In billions") == "billions"
+    assert parse_unit("Billions") == "billions"
+    assert parse_unit("billions") == "billions"
+
+
+def test_parse_unit_percent():
+    assert parse_unit("Percent") == "percent"
+    assert parse_unit("In percent") == "percent"
+    assert parse_unit("percent") == "percent"
+
+
+def test_parse_unit_none_or_empty():
+    assert parse_unit("") is None
+    assert parse_unit(None) is None
+
+
+def test_parse_unit_unrecognized():
+    assert parse_unit("Index numbers") is None
+    assert parse_unit("some random text") is None
+
+
+# ── convert_unit() ──────────────────────────────────────────────────────────
+
+
+def test_convert_unit_thousands_to_millions():
+    """Source=thousands (1e3), target=millions (1e6) → divide by 1000."""
+    assert convert_unit(5000, "thousands", "millions") == 5.0
+
+
+def test_convert_unit_millions_to_thousands():
+    """Source=millions (1e6), target=thousands (1e3) → multiply by 1000."""
+    assert convert_unit(5, "millions", "thousands") == 5000.0
+
+
+def test_convert_unit_thousands_to_billions():
+    """Source=thousands (1e3), target=billions (1e9) → divide by 1e6."""
+    assert convert_unit(3_000_000, "thousands", "billions") == 3.0
+
+
+def test_convert_unit_millions_to_billions():
+    """Source=millions (1e6), target=billions (1e9) → divide by 1000."""
+    assert convert_unit(2500, "millions", "billions") == 2.5
+
+
+def test_convert_unit_same_units():
+    """When source and target match, no conversion."""
+    assert convert_unit(42, "millions", "millions") == 42.0
+    assert convert_unit(100, "thousands", "thousands") == 100.0
+
+
+def test_convert_unit_source_none():
+    """No source unit → no conversion (return value unchanged)."""
+    assert convert_unit(42, None, "millions") == 42.0
+
+
+def test_convert_unit_target_none():
+    """No target unit → no conversion (return value unchanged)."""
+    assert convert_unit(42, "millions", None) == 42.0
+
+
+def test_convert_unit_both_none():
+    """Both None → no conversion."""
+    assert convert_unit(42, None, None) == 42.0
+
+
+def test_convert_unit_list():
+    """convert_unit applies element-wise to lists."""
+    assert convert_unit([1000, 2000, 3000], "thousands", "millions") == [1.0, 2.0, 3.0]
+
+
+def test_convert_unit_percent_no_conversion():
+    """Percent source + percent target → no conversion."""
+    assert convert_unit(5.3, "percent", "percent") == 5.3
+
+
+# ── format_result() with unit conversion ────────────────────────────────────
+
+
+def test_format_result_unit_thousands_to_millions():
+    """Source thousands, output millions → value / 1000."""
+    fmt = {"type": "number", "unit": "millions"}
+    assert format_result(5000, fmt, source_unit="thousands") == "5.0"
+
+
+def test_format_result_unit_millions_to_billions():
+    """Source millions, output billions → value / 1000."""
+    fmt = {"type": "number", "unit": "billions"}
+    assert format_result(2500, fmt, source_unit="millions") == "2.5"
+
+
+def test_format_result_unit_same_no_conversion():
+    """Same unit → no conversion applied."""
+    fmt = {"type": "number", "unit": "millions"}
+    assert format_result(42, fmt, source_unit="millions") == "42"
+
+
+def test_format_result_unit_none_source():
+    """No source unit → no conversion (backward compat)."""
+    fmt = {"type": "number", "unit": "millions"}
+    assert format_result(42, fmt, source_unit=None) == "42"
+
+
+def test_format_result_unit_none_target():
+    """No target unit in output_format → no conversion (backward compat)."""
+    fmt = {"type": "number"}
+    assert format_result(42, fmt, source_unit="millions") == "42"
+
+
+def test_format_result_unit_both_none():
+    """Both None → no conversion (backward compat)."""
+    fmt = {"type": "number"}
+    assert format_result(42, fmt, source_unit=None) == "42"
+
+
+def test_format_result_unit_with_rounding():
+    """Unit conversion + rounding should work together."""
+    fmt = {"type": "number", "unit": "millions", "rounding": "integer"}
+    # 4999 thousands → 4.999 millions → rounded to integer = 5.0
+    assert format_result(4999, fmt, source_unit="thousands") == "5.0"
+
+
+def test_format_result_unit_list_conversion():
+    """Unit conversion on list results."""
+    fmt = {"type": "list", "unit": "millions"}
+    result = format_result([1000, 2000], fmt, source_unit="thousands")
+    assert result == "[1.0, 2.0]"

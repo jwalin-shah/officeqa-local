@@ -18,7 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from compute import ComputeError, format_result, validate_extractions
+from compute import ComputeError, format_result, parse_unit, validate_extractions
 from compute import execute as compute_execute
 from extract import extract_structured
 from find import resolve_cells
@@ -689,6 +689,31 @@ def _total_entries(per_dr: dict) -> int:
     return sum(len(v) for v in per_dr.values())
 
 
+def _determine_source_unit(per_dr_entries: dict) -> str | None:
+    """Determine the source unit from retrieval entries.
+
+    Checks the first table entry for each data_request and returns the
+    most common unit across DRs. Returns None if no unit info is found.
+    """
+    from collections import Counter
+
+    units: list[str] = []
+    for _dr_id, entries in per_dr_entries.items():
+        for e in entries:
+            raw_unit = e.get("unit")
+            if raw_unit:
+                parsed = parse_unit(raw_unit)
+                if parsed:
+                    units.append(parsed)
+                    break  # first table entry with a unit is enough per DR
+
+    if not units:
+        return None
+
+    # Return the most common unit (majority vote)
+    return Counter(units).most_common(1)[0][0]
+
+
 def _run_extract_and_compute(
     spec: dict,
     per_dr_entries: dict,
@@ -742,7 +767,8 @@ def _run_extract_and_compute(
     except ComputeError as e:
         return f"COMPUTE_FAILED: {e}", extraction
 
-    formatted = format_result(result, spec.get("output_format") or {})
+    source_unit = _determine_source_unit(per_dr_entries)
+    formatted = format_result(result, spec.get("output_format") or {}, source_unit=source_unit)
     return formatted, extraction
 
 
@@ -963,7 +989,10 @@ if __name__ == "__main__":
                         return row, f"NO_VALUES[{vid}]"
                 try:
                     result = compute_execute(spec, extraction["extractions"], verbose=verbose)
-                    return row, format_result(result, spec.get("output_format") or {})
+                    source_unit = _determine_source_unit(filtered)
+                    return row, format_result(
+                        result, spec.get("output_format") or {}, source_unit=source_unit
+                    )
                 except ComputeError as e:
                     return row, f"COMPUTE_FAILED: {e}"
             return row, solve(question, verbose=verbose)

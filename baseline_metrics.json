@@ -28,7 +28,13 @@
   },
   "oracle_extraction": {
     "accuracy": 35.0,
-    "n": 20
+    "n": 20,
+    "note": "Legacy extract_answer() path; unit conversion in format_result() does not affect this metric"
+  },
+  "unit_conversion": {
+    "parse_unit_coverage": "millions, thousands, billions, percent",
+    "format_result_source_unit": true,
+    "test_coverage": "48 tests in tests/test_compute.py including 25 new unit conversion tests"
   },
   "decompose_validation": {
     "total_lines": 246,

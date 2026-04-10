@@ -17,6 +17,83 @@ class ComputeError(Exception):
     pass
 
 
+# ── Unit conversion ──────────────────────────────────────────────────────────
+
+UNIT_MULTIPLIERS: dict[str, float] = {
+    "thousands": 1e3,
+    "millions": 1e6,
+    "billions": 1e9,
+    "percent": 1.0,
+}
+
+# Canonical aliases that map to the same multiplier key
+_UNIT_ALIASES: dict[str, str] = {
+    "thousand": "thousands",
+    "million": "millions",
+    "billion": "billions",
+    "%": "percent",
+}
+
+
+def parse_unit(raw: str | None) -> str | None:
+    """Parse a table-header unit string into a canonical unit key.
+
+    Handles strings like "In millions of dollars", "In thousands",
+    "Percent", "billions", etc. Returns a key from UNIT_MULTIPLIERS
+    or None if the unit can't be identified.
+    """
+    if not raw:
+        return None
+    text = raw.strip().lower()
+
+    # Direct canonical match
+    if text in UNIT_MULTIPLIERS:
+        return text
+
+    # Alias match
+    if text in _UNIT_ALIASES:
+        return _UNIT_ALIASES[text]
+
+    # Scan for known scale words in the text
+    for key in ("billions", "millions", "thousands", "percent"):
+        if key in text:
+            return key
+    # Singular forms
+    for singular, plural in _UNIT_ALIASES.items():
+        if singular in text:
+            return plural
+
+    return None
+
+
+def convert_unit(value, source_unit: str | None, target_unit: str | None):
+    """Apply unit conversion when source and target units differ.
+
+    Formula: converted = value * (source_multiplier / target_multiplier)
+    E.g., source='thousands' (1e3) + target='millions' (1e6) → value / 1000.
+
+    Returns the value unchanged if either unit is None or they match.
+    Applies element-wise to lists/tuples.
+    """
+    if source_unit is None or target_unit is None:
+        return value
+    if source_unit == target_unit:
+        return value
+
+    src_mult = UNIT_MULTIPLIERS.get(source_unit)
+    tgt_mult = UNIT_MULTIPLIERS.get(target_unit)
+    if src_mult is None or tgt_mult is None:
+        return value  # unrecognized unit — don't convert
+
+    factor = src_mult / tgt_mult
+
+    if isinstance(value, (list, tuple)):
+        return [v * factor if isinstance(v, (int, float)) else v for v in value]
+    if isinstance(value, (int, float)):
+        return value * factor
+    return value  # non-numeric — don't convert
+
+
 def validate_extractions(spec: dict, extractions: dict) -> list[str]:
     """Return a list of warnings; empty if everything looks good."""
     warnings = []
@@ -147,14 +224,23 @@ def execute(spec: dict, extractions: dict, verbose: bool = False):
     return local_vars["result"]
 
 
-def format_result(result, output_format: dict) -> str:
-    """Format the computed result as a string for the reward function."""
+def format_result(result, output_format: dict, source_unit: str | None = None) -> str:
+    """Format the computed result as a string for the reward function.
+
+    If `source_unit` and output_format.unit differ, applies unit conversion
+    before formatting. E.g., source='thousands', unit='millions' → divides
+    by 1000.
+    """
     if result is None:
         return "None"
 
     fmt = output_format or {}
     rtype = fmt.get("type", "number")
     rounding = fmt.get("rounding")
+    target_unit = fmt.get("unit")
+
+    # Apply unit conversion when source and target differ
+    result = convert_unit(result, source_unit, target_unit)
 
     round_map = {
         "integer": 0,
