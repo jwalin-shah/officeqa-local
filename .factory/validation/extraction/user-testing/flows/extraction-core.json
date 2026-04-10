@@ -1,0 +1,119 @@
+{
+  "milestone": "extraction",
+  "groupId": "extraction-core",
+  "surface": "CLI",
+  "toolsUsed": ["Execute", "Read", "Grep"],
+  "assertions": [
+    {
+      "id": "VAL-EXTR-001",
+      "status": "pass",
+      "reason": "Vertical serialization for wide tables and month index annotations are covered by passing extraction tests.",
+      "evidence": [
+        {
+          "command": "uv run pytest tests/test_extraction.py -v",
+          "exitCode": 0,
+          "observation": "pytest passed (88 tests). Relevant passing tests: test_vertical_12_column_monthly_table, test_vertical_month_indices_chronological, test_vertical_wide_table_used_in_render_entry."
+        }
+      ]
+    },
+    {
+      "id": "VAL-EXTR-002",
+      "status": "pass",
+      "reason": "Deterministic fast-path behavior before LLM extraction is validated by passing tests that assert no LLM call when all DRs resolve.",
+      "evidence": [
+        {
+          "command": "uv run pytest tests/test_extraction.py -v",
+          "exitCode": 0,
+          "observation": "Relevant passing tests: test_fast_path_all_resolve_annual, test_fast_path_with_run_extract_and_compute, test_run_extract_and_compute_skips_llm_when_all_resolved."
+        }
+      ]
+    },
+    {
+      "id": "VAL-EXTR-003",
+      "status": "pass",
+      "reason": "Fast-path miss and partial-resolve fallback to normal extraction is validated by passing fallback tests.",
+      "evidence": [
+        {
+          "command": "uv run pytest tests/test_extraction.py -v",
+          "exitCode": 0,
+          "observation": "Relevant passing tests: test_fast_path_partial_resolve_falls_back, test_fast_path_fallback_to_llm, test_fast_path_partial_returns_resolved_and_unresolved, test_run_extract_and_compute_merges_partial_fast_path."
+        }
+      ]
+    },
+    {
+      "id": "VAL-EXTR-004",
+      "status": "pass",
+      "reason": "Monthly pre-extraction annotation behavior for CY sums is validated by passing pre-extraction tests.",
+      "evidence": [
+        {
+          "command": "uv run pytest tests/test_extraction.py -v",
+          "exitCode": 0,
+          "observation": "Relevant passing tests: test_pre_extract_vertical_monthly, test_pre_extract_annotation_format, test_pre_extract_pipe_monthly_rows."
+        }
+      ]
+    },
+    {
+      "id": "VAL-EXTR-005",
+      "status": "pass",
+      "reason": "Calendar-year context row filtering behavior is validated by passing filter_cy_rows tests.",
+      "evidence": [
+        {
+          "command": "uv run pytest tests/test_extraction.py -v",
+          "exitCode": 0,
+          "observation": "Relevant passing tests: test_filter_cy_rows_bare_year_pipe, test_filter_cy_rows_fiscal_year_pipe, test_filter_cy_rows_vertical_format."
+        }
+      ]
+    },
+    {
+      "id": "VAL-EXTR-006",
+      "status": "pass",
+      "reason": "Unit conversion in format_result() is validated by passing compute unit-conversion tests.",
+      "evidence": [
+        {
+          "command": "uv run pytest tests/test_compute.py -v",
+          "exitCode": 0,
+          "observation": "pytest passed (48 tests). Relevant passing tests: test_convert_unit_thousands_to_millions, test_format_result_unit_thousands_to_millions, test_format_result_unit_millions_to_billions, test_format_result_unit_with_rounding."
+        }
+      ]
+    },
+    {
+      "id": "VAL-EXTR-007",
+      "status": "fail",
+      "reason": "Oracle extraction accuracy for n=50 is below the contract baseline expectation.",
+      "evidence": [
+        {
+          "command": "uv run python extract.py --test-oracle --n 50",
+          "exitCode": 0,
+          "observation": "Run completed with 'Oracle extraction: 12/50 = 24.0%'."
+        },
+        {
+          "command": "rg -n \"VAL-EXTR-007|40%\" validation-contract.md",
+          "exitCode": 0,
+          "observation": "Contract states VAL-EXTR-007 requires n=50 accuracy equal to or better than pre-change baseline (40% on n=10)."
+        },
+        {
+          "command": "python3 -c \"import json; d=json.load(open('baseline_metrics.json')); print(d['oracle_extraction'])\"",
+          "exitCode": 0,
+          "observation": "Current baseline_metrics.json also records oracle_extraction accuracy 28.0 on n=50, still above observed 24.0%."
+        }
+      ]
+    },
+    {
+      "id": "VAL-EXTR-009",
+      "status": "pass",
+      "reason": "External-source data requests are handled gracefully without crashes per passing fast-path external source tests.",
+      "evidence": [
+        {
+          "command": "uv run pytest tests/test_extraction.py -v",
+          "exitCode": 0,
+          "observation": "Relevant passing tests: test_fast_path_external_source_graceful and test_fast_path_partial_external_source_dr."
+        }
+      ]
+    }
+  ],
+  "frictions": [
+    "oracle extraction output includes long per-question reasoning on misses, which makes manual review noisy; final metric was extracted from the ending summary line.",
+    "pytest logs contain ANSI color codes in captured output, but assertions and pass/fail states remained readable."
+  ],
+  "blockers": []
+}

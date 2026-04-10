@@ -1,0 +1,35 @@
+{
+  "milestone": "extraction",
+  "round": 1,
+  "status": "fail",
+  "assertionsSummary": {
+    "total": 8,
+    "passed": 7,
+    "failed": 1,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-EXTR-001",
+    "VAL-EXTR-002",
+    "VAL-EXTR-003",
+    "VAL-EXTR-004",
+    "VAL-EXTR-005",
+    "VAL-EXTR-006",
+    "VAL-EXTR-009"
+  ],
+  "failedAssertions": [
+    {
+      "id": "VAL-EXTR-007",
+      "reason": "Oracle extraction accuracy for n=50 is below the contract baseline expectation."
+    }
+  ],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added CLI guidance note to parse oracle extraction accuracy from the final summary line because per-question miss traces are verbose.",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}

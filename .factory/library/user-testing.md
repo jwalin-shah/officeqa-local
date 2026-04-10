@@ -65,6 +65,8 @@ Given the resource constraints:
 - Test runs: `uv run pytest --tb=short -v`
 - Retrieval eval: `uv run python retrieve_v2.py --test`
 - Ledger eval: `uv run python eval_ledger.py`
+- Oracle extraction eval: `uv run python extract.py --test-oracle --n 50` (extract final accuracy from the ending summary line `Oracle extraction: X/N = Y%`, since per-question traces are verbose)
+- Strategy evidence for retrieval: `retrieve_v2.py` currently does not expose `--verbose`; use per-question `via=...` lines from `--test` output plus retrieval unit-test traces as the proof surface.
 
 ## Testing Strategy
 
