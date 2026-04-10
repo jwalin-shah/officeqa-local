@@ -43,6 +43,29 @@ Given the resource constraints:
 
 **Max concurrent validators: 1** — resource-constrained machine, single SQLite DB, limited RAM headroom.
 
+## Flow Validator Guidance: CLI
+
+**Surface:** Direct command execution (no browser, no TUI)
+**Tool:** Execute shell commands via the Execute tool directly — no skill invocation needed.
+
+**Isolation rules:**
+- All validators share the same `ledger.sqlite` — run sequentially, never concurrently
+- Do NOT modify `ledger.sqlite`, `corpus_json/`, `corpus/`, or `officeqa_full.csv`
+- Do NOT run `build_ledger.py` (modifies DB) — use read-only queries only
+- Working directory: `/Users/jwalinshah/projects/officeqa-local`
+- All commands run with `uv run python ...` or `uv run pytest ...`
+
+**Evidence collection:**
+- Capture command stdout/stderr as evidence
+- For each assertion, record the specific command output that proves pass/fail
+
+**Common patterns:**
+- DB checks: `uv run python -c "import sqlite3; ..."`
+- File checks: `ls -lh ledger.sqlite`, `cat baseline_metrics.json`
+- Test runs: `uv run pytest --tb=short -v`
+- Retrieval eval: `uv run python retrieve_v2.py --test`
+- Ledger eval: `uv run python eval_ledger.py`
+
 ## Testing Strategy
 
 1. After each code change: run `uv run pytest` and `uv run python retrieve_v2.py --test` (deterministic, fast)
