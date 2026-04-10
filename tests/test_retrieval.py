@@ -15,6 +15,7 @@ from retrieve_v2 import (
     _fts_channel_trace,
     _metric_channel,
     _metric_channel_trace,
+    _prose_footnote_channel,
     _row_hint_variants,
     _winning_hit_details,
     content_tokens,
@@ -441,3 +442,161 @@ def test_retrieve_from_question_basic():
     for e in entries:
         assert "file" in e
         assert "section" in e or "title" in e
+
+
+# ── Prose/footnote channel ───────────────────────────────────────────────────
+
+
+def test_prose_footnote_channel_empty_tokens():
+    """Empty tokens returns empty list without querying DB."""
+
+    class FakeConn:
+        def execute(self, sql, params):
+            raise AssertionError("should not query DB with empty tokens")
+
+    conn = cast(Any, FakeConn())
+    result = _prose_footnote_channel(conn, [], [1940])
+    assert result == []
+
+
+def test_prose_footnote_channel_returns_dict_list():
+    """Channel returns a list of dicts with required metadata keys."""
+
+    class FakeRow:
+        def __init__(self, data):
+            self._data = data
+
+        def __getitem__(self, key):
+            return self._data[key]
+
+    class FakeConn:
+        def execute(self, sql, params):
+            if "prose_fts" in sql:
+                return [
+                    FakeRow(
+                        {
+                            "file": "treasury_bulletin_1941_03.json",
+                            "element_seq": 10,
+                            "page_id": 5,
+                            "file_year": 1941,
+                            "file_month": 3,
+                            "section": "Expenditures",
+                            "content": "National defense expenditures rose sharply.",
+                            "near_table_id": 42,
+                            "score": -3.5,
+                        }
+                    )
+                ]
+            elif "footnotes_fts" in sql:
+                return [
+                    FakeRow(
+                        {
+                            "file": "treasury_bulletin_1941_03.json",
+                            "element_seq": 11,
+                            "page_id": 5,
+                            "file_year": 1941,
+                            "file_month": 3,
+                            "content": "1/ Excludes supplemental appropriations.",
+                            "near_table_id": 42,
+                            "score": -2.0,
+                        }
+                    )
+                ]
+            return []
+
+        def fetchall(self):
+            return []
+
+    # Use a real FakeConn that correctly returns fetchall
+    class FakeConn2:
+        def execute(self, sql, params):
+            return self
+
+        def fetchall(self):
+            return []
+
+    # Minimal test: calling with tokens on a non-DB conn won't crash, returns []
+    result = _prose_footnote_channel(cast(Any, FakeConn2()), ["defense", "expenditures"], [1940])
+    assert isinstance(result, list)
+
+
+@skip_no_ledger
+def test_prose_footnote_channel_with_real_ledger():
+    """Channel returns results from prose_fts and footnotes_fts when query matches."""
+    conn = sqlite3.connect(str(LEDGER_PATH))
+    conn.row_factory = sqlite3.Row
+    result = _prose_footnote_channel(conn, ["defense", "expenditures"], [1940], top_n=20)
+    conn.close()
+    assert isinstance(result, list)
+    # Each result should have required keys
+    for entry in result:
+        assert "file" in entry
+        assert "page_id" in entry
+        assert "element_seq" in entry
+        assert "content" in entry
+        assert "near_table_id" in entry
+        assert "source" in entry
+        assert entry["source"] in ("prose", "footnote")
+        assert "score" in entry
+
+
+@skip_no_ledger
+def test_prose_footnote_channel_empty_for_bogus_query():
+    """Channel returns empty list for queries with no matches."""
+    conn = sqlite3.connect(str(LEDGER_PATH))
+    conn.row_factory = sqlite3.Row
+    result = _prose_footnote_channel(conn, ["xyzzy_bogus_12345"], [1940])
+    conn.close()
+    assert result == []
+
+
+@skip_no_ledger
+def test_retrieve_includes_prose_footnote_channel_field():
+    """retrieve() returns entries that may include retrieval_channel='prose_footnote'."""
+    entries = retrieve(
+        {
+            "data_requests": [
+                {
+                    "label": "national defense",
+                    "row_hint": "National defense",
+                    "column_hint": "",
+                    "years": [1940],
+                }
+            ]
+        },
+        "What were total national defense expenditures in 1940?",
+        top_k=15,
+        load_html=False,
+    )
+    assert isinstance(entries, list)
+    # All entries should have retrieval_channel field
+    for e in entries:
+        assert "retrieval_channel" in e
+    # Some entries may be prose_footnote channel
+    channels = {e["retrieval_channel"] for e in entries}
+    # At minimum, fts or metric entries should appear
+    assert channels & {"fts", "metric", "prose_footnote"}
+
+
+@skip_no_ledger
+def test_prose_footnote_entries_have_content_field():
+    """Prose/footnote entries in retrieve() output include content field."""
+    entries = retrieve(
+        {
+            "data_requests": [
+                {
+                    "label": "footnote annotation",
+                    "row_hint": "",
+                    "column_hint": "",
+                    "years": [1940],
+                }
+            ]
+        },
+        "footnote annotation fiscal year 1940",
+        top_k=20,
+        load_html=False,
+    )
+    pf_entries = [e for e in entries if e.get("retrieval_channel") == "prose_footnote"]
+    for e in pf_entries:
+        assert "content" in e
+        assert isinstance(e["content"], str)

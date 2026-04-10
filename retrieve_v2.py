@@ -920,6 +920,120 @@ def _metric_channel_trace(
     )
 
 
+# ── Prose/footnote supplementary channel ────────────────────────────────────
+
+
+def _prose_footnote_channel(
+    conn: sqlite3.Connection,
+    q_tokens: list[str],
+    target_years: list[int],
+    top_n: int = 50,
+) -> list[dict]:
+    """Search prose_fts and footnotes_fts for supplementary context.
+
+    Returns hits with file, page_id, element_seq, content, near_table_id
+    metadata. Prose/footnote hits are weighted lower than direct table hits
+    — they are supplementary context for ~6% of questions that require
+    footnote/prose data not captured in the table cells.
+    """
+    if not q_tokens:
+        return []
+
+    # Try AND first (more precise), fall back to OR query
+    and_query = _fts_escape(q_tokens, mode="and")
+    or_query = _fts_escape(q_tokens, mode="or")
+    fts_query = and_query or or_query
+    if not fts_query:
+        return []
+
+    # Build optional year range filter
+    year_clause = ""
+    year_params: list[int] = []
+    if target_years:
+        window_min = min(target_years)
+        window_max = max(target_years) + 4
+        year_clause = "AND p.file_year BETWEEN ? AND ?"
+        year_params = [window_min, window_max]
+
+    fn_year_clause = ""
+    fn_year_params: list[int] = []
+    if target_years:
+        window_min = min(target_years)
+        window_max = max(target_years) + 4
+        fn_year_clause = "AND f.file_year BETWEEN ? AND ?"
+        fn_year_params = [window_min, window_max]
+
+    results: list[dict] = []
+
+    # ── prose_fts channel ──
+    try:
+        prose_sql = (
+            " SELECT p.id, p.file, p.element_seq, p.page_id,"  # nosec B608
+            " p.file_year, p.file_month, p.section, p.content,"
+            " p.near_table_id,"
+            " bm25(prose_fts, 2.0, 1.5, 1.5) AS score"
+            " FROM prose_fts"
+            " JOIN prose p ON p.id = prose_fts.rowid"
+            f" WHERE prose_fts MATCH ? {year_clause}"
+            " ORDER BY score"
+            f" LIMIT {top_n}"
+        )
+        rows = conn.execute(prose_sql, [fts_query, *year_params]).fetchall()
+        for r in rows:
+            results.append(
+                {
+                    "file": r["file"],
+                    "element_seq": int(r["element_seq"]),
+                    "page_id": int(r["page_id"]) if r["page_id"] is not None else None,
+                    "file_year": r["file_year"],
+                    "file_month": r["file_month"],
+                    "section": r["section"] or "",
+                    "content": r["content"] or "",
+                    "near_table_id": r["near_table_id"],
+                    "score": float(r["score"]),
+                    "source": "prose",
+                }
+            )
+    except sqlite3.OperationalError:
+        pass
+
+    # ── footnotes_fts channel ──
+    try:
+        fn_sql = (
+            " SELECT f.id, f.file, f.element_seq, f.page_id,"  # nosec B608
+            " f.file_year, f.file_month, f.content,"
+            " f.attached_to_table_id AS near_table_id,"
+            " bm25(footnotes_fts, 2.0) AS score"
+            " FROM footnotes_fts"
+            " JOIN footnotes f ON f.id = footnotes_fts.rowid"
+            f" WHERE footnotes_fts MATCH ? {fn_year_clause}"
+            " ORDER BY score"
+            f" LIMIT {top_n}"
+        )
+        fn_rows = conn.execute(fn_sql, [fts_query, *fn_year_params]).fetchall()
+        for r in fn_rows:
+            results.append(
+                {
+                    "file": r["file"],
+                    "element_seq": int(r["element_seq"]),
+                    "page_id": int(r["page_id"]) if r["page_id"] is not None else None,
+                    "file_year": r["file_year"],
+                    "file_month": r["file_month"],
+                    "section": "",
+                    "content": r["content"] or "",
+                    "near_table_id": r["near_table_id"],
+                    "score": float(r["score"]),
+                    "source": "footnote",
+                }
+            )
+    except sqlite3.OperationalError:
+        pass
+
+    # Sort ascending (lower bm25 score = better match)
+    results.sort(key=lambda x: x["score"])
+    return results[:top_n]
+
+
 # ── Top-level retrieve (two-channel union) ──────────────────────────────────
 
 
@@ -961,6 +1075,7 @@ def retrieve(
         target_years,
         wants_monthly,
     )
+    pf_hits = _prose_footnote_channel(conn, q_tokens, target_years)
     fts_rows = fts_trace.rows
     metric_rows = metric_trace.rows
 
@@ -1013,8 +1128,8 @@ def retrieve(
 
     if verbose:
         print(
-            f"  fts={len(fts_rows)} metric={len(metric_rows)} "
-            f"union={len(all_ids)} years={target_years} mode={year_mode}"
+            f"  fts={len(fts_rows)} metric={len(metric_rows)} pf={len(pf_hits)}"
+            f" union={len(all_ids)} years={target_years} mode={year_mode}"
             f" fts_attempts={fts_trace.attempts} metric_attempts={metric_trace.attempts}",
             flush=True,
         )
@@ -1080,6 +1195,74 @@ def retrieve(
         entries.append(entry)
         if len(entries) >= top_k:
             break
+
+    # ── Supplementary prose/footnote entries ──────────────────────────────
+    # Add prose/footnote entries as supplementary context (up to PF_MAX_SLOTS).
+    # Unlike table entries, PF entries are NOT deduplicated by file — they carry
+    # different content (element_seq ≠ table element_seq) and may include
+    # footnotes or prose that modify/explain table values. This is the key
+    # channel for ~6% of benchmark questions where the answer is in footnotes.
+    # We use a separate seen_element set to avoid exact duplicates.
+    _PF_MAX_SLOTS = 3
+    if pf_hits:
+        seen_elements: set[tuple[str, int]] = set()
+        # Pre-populate with element_seqs from already-added table entries
+        for e in entries:
+            seen_elements.add((e["file"], e["element_seq"]))
+
+        # Collect best-scoring PF hit per (file, source) combination
+        pf_by_key: dict[tuple[str, str], dict] = {}
+        for hit in pf_hits:
+            key = (hit["file"], hit["source"])
+            if key not in pf_by_key or hit["score"] < pf_by_key[key]["score"]:
+                pf_by_key[key] = hit
+
+        pf_added = 0
+        for hit in sorted(pf_by_key.values(), key=lambda h: h["score"]):
+            if pf_added >= _PF_MAX_SLOTS:
+                break
+            elem_key = (hit["file"], hit["element_seq"])
+            if elem_key in seen_elements:
+                continue
+            seen_elements.add(elem_key)
+
+            # Apply file-year bonus to filter time-irrelevant PF entries
+            pf_file_bonus = _file_year_bonus(
+                hit.get("file_year"),
+                hit.get("file_month"),
+                target_years,
+                year_mode,
+            )
+            # Only include PF entries with reasonable year proximity
+            if target_years and pf_file_bonus == 0.0:
+                continue
+
+            entries.append(
+                {
+                    "file": hit["file"],
+                    "element_id": None,
+                    "element_seq": hit["element_seq"],
+                    "page_id": hit["page_id"],
+                    "file_year": hit.get("file_year"),
+                    "file_month": hit.get("file_month"),
+                    "section": hit.get("section") or "",
+                    "title": "",
+                    "caption": "",
+                    "column_headers": [],
+                    "row_labels": [],
+                    "years": [],
+                    "unit": "",
+                    "period": "",
+                    "n_rows": 0,
+                    "n_cols": 0,
+                    "retrieval_strategy": f"prose_footnote:{hit['source']}",
+                    "retrieval_channel": "prose_footnote",
+                    "html": "",
+                    "content": hit["content"],
+                    "near_table_id": hit.get("near_table_id"),
+                }
+            )
+            pf_added += 1
 
     return entries
 
@@ -1160,6 +1343,7 @@ def _test_recall_ledger(n: int = 0) -> None:
 
     hits_at_1 = hits_at_5 = hits_at_10 = hits_at_20 = hits_at_30 = total = 0
     file_hits_at_10 = 0
+    pf_contrib = 0  # questions where prose/footnote entries appeared in results
     per_q_times: list[float] = []
     t0 = time.time()
 
@@ -1208,6 +1392,8 @@ def _test_recall_ledger(n: int = 0) -> None:
             hits_at_30 += 1
         if any(e["file"] in gold_files for e in results[:10]):
             file_hits_at_10 += 1
+        if any(e.get("retrieval_channel") == "prose_footnote" for e in results):
+            pf_contrib += 1
 
         mark = (
             "HIT@1"
@@ -1246,6 +1432,10 @@ def _test_recall_ledger(n: int = 0) -> None:
     print(
         f"  (ref) file-level recall@10 = {file_hits_at_10}/{total} "
         f"= {file_hits_at_10 / total * 100:.1f}%"
+    )
+    print(
+        f"  prose/footnote contributions = {pf_contrib}/{total} "
+        f"= {pf_contrib / total * 100:.1f}% of questions"
     )
     if per_q_times:
         per_q_times.sort()
