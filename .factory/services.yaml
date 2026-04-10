@@ -6,6 +6,7 @@ commands:
   retrieval_recall: uv run python retrieve_v2.py --test
   ledger_reachability: uv run python eval_ledger.py
   oracle_extract: uv run python extract.py --test-oracle --n 20
+  oracle_extract_n50: uv run python extract.py --test-oracle --n 50
   sample_eval: uv run python solve.py --eval --n 20
   full_eval: uv run python solve.py --eval
   build_ledger: uv run python build_ledger.py
