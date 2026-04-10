@@ -23,12 +23,15 @@ Question → scout() → decompose() → retrieve_for_spec() → extract_structu
 ## Ledger Schema (ledger.sqlite)
 - `tables` — one row per source table (94K tables)
 - `table_columns` — columns with parsed year/month (893K)
-- `table_rows` — rows with row_path, indent level (2.9M)
-- `cells` — raw parsed cells with flags (23.4M)
-- `metrics` — materialized denormalized view (21.4M, TARGET: convert to VIEW)
+- `table_rows` — rows with row_path, indent level, metric_slug (2.9M)
+- `cells` — raw parsed cells with flags (~19M after is_missing deletion)
+- `metrics` — VIEW over cells/table_rows/table_columns/tables UNION ALL metrics_synthesized (~21.4M rows)
+- `metrics_synthesized` — ~10K CY/FY synthetic total rows (is_synthesized=1)
 - `row_label_lookup` / `col_label_lookup` — dedup'd lookup tables for metric channel
 - `prose` / `footnotes` / `page_metadata` — non-table elements
 - FTS: `tables_fts`, `prose_fts`, `footnotes_fts`
+
+DB size: ~2.2GB (reduced from 7.8GB after metrics VIEW migration + is_missing cell deletion)
 
 ## Arena Reference Architecture
 The arena's best systems used: deterministic ingestion → structured extraction via sub-agents → deterministic computation. Our pipeline follows this pattern. Key arena techniques to port:

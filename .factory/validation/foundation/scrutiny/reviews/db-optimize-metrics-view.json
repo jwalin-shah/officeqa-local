@@ -1,0 +1,61 @@
+{
+  "featureId": "db-optimize-metrics-view",
+  "reviewedAt": "2026-04-10T17:55:00.000Z",
+  "commitId": "1439781",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The implementation correctly converts the metrics materialized table (~5.3GB) to a VIEW over cells/table_rows/table_columns/tables UNION ALL metrics_synthesized. The migration script (migrate_metrics_to_view.py, 291 lines) is idempotent and well-structured with clear step-by-step execution, pre-migration checks, and post-migration assertions. The build_ledger.py was updated consistently — the metrics VIEW DDL, metrics_synthesized schema, and build_metric_layer() function all match the migration script's definitions. Retrieval recall@10 is unchanged at 25.6% with 8.5x latency improvement. DB size reduced from 7.8GB to 2.2GB (target <3GB met). All expected behaviors verified: metrics is a VIEW, metrics_synthesized has ~10K rows, row_label_lookup and col_label_lookup are unchanged, and all metrics-specific indices were dropped.",
+    "issues": [
+      {
+        "file": "build_ledger.py",
+        "line": 2112,
+        "severity": "non_blocking",
+        "description": "build_ledger.py does not delete is_missing=1 cells after building the metric layer. The migration script deletes 4.3M is_missing cells as a size optimization, but a fresh `--rebuild` via build_ledger.py will recreate them — meaning a fresh build will produce a ~7.8GB DB that doesn't meet the <3GB target. Consider adding a cell cleanup step (DELETE FROM cells WHERE is_missing=1 + VACUUM) in build() after build_metric_layer() to keep fresh builds consistent with the post-migration state."
+      },
+      {
+        "file": "migrate_metrics_to_view.py",
+        "line": 83,
+        "severity": "non_blocking",
+        "description": "The VIEW's WHERE clause includes `c.parse_status IN ('ok', 'missing')`, but after the migration deletes all is_missing=1 cells, the 'missing' condition is dead code. This is correct for fresh builds (where missing cells still exist) but could be confusing. Minor clarity issue only."
+      },
+      {
+        "file": "migrate_metrics_to_view.py",
+        "line": 27,
+        "severity": "non_blocking",
+        "description": "normalize_metric_slug function is duplicated between migrate_metrics_to_view.py and build_ledger.py (line 1631). Acceptable for a one-time migration script, but any future changes to the slug normalization logic must be applied to both files."
+      },
+      {
+        "file": "migrate_metrics_to_view.py",
+        "line": 104,
+        "severity": "non_blocking",
+        "description": "PRAGMA cache_size=-2000000 allocates ~2GB of cache. Per AGENTS.md, the machine has 8GB RAM. This is fine for a one-time migration but is aggressive for the memory-constrained environment."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "architecture.md still describes metrics as 'materialized denormalized view (21.4M, TARGET: convert to VIEW)' and cells as '23.4M'. These are now stale: metrics is a VIEW, cells are ~19M after deleting 4.3M is_missing rows. The architecture doc should be updated to reflect the new schema state.",
+      "evidence": ".factory/library/architecture.md line '- `metrics` — materialized denormalized view (21.4M, TARGET: convert to VIEW)' — this target is now achieved and should say 'VIEW over cells/table_rows/table_columns/tables UNION ALL metrics_synthesized'"
+    },
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md and architecture.md do not document the new metric_slug column on table_rows or the metrics_synthesized table. Future workers modifying the ledger schema or retrieval should know these exist.",
+      "evidence": "build_ledger.py:172 adds metric_slug to table_rows DDL; build_ledger.py:266 defines metrics_synthesized table. Neither is mentioned in .factory/library/architecture.md's Ledger Schema section."
+    },
+    {
+      "area": "skills",
+      "observation": "Worker deviated from TDD (Step 2) by not writing unit tests, using before/after retrieve_v2.py --test comparison instead. The deviation was justified — DB schema migrations are better verified by system-level behavior comparison than unit tests. The skill's Step 2 could note this exception for migration/optimization features.",
+      "evidence": "Handoff skillFeedback.deviations[0]: 'Skipped creating unit tests since this is a DB migration feature. Verified correctness through comprehensive before/after retrieval recall comparison.'"
+    },
+    {
+      "area": "services",
+      "observation": "The services.yaml now has a build_ledger command but no migrate command. If migrate_metrics_to_view.py is intended to be run by future workers, it should be documented.",
+      "evidence": "services.yaml has 'build_ledger: uv run python build_ledger.py' but no entry for migrate_metrics_to_view.py"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The db-optimize-metrics-view feature is correctly implemented. The metrics table was successfully converted from a 5.3GB materialized table to a lightweight VIEW, with ~10K synthesized rows preserved in metrics_synthesized. DB size reduced 72% (7.8GB → 2.2GB). Retrieval recall is unchanged. The migration script is idempotent and well-verified. Four non-blocking issues identified: (1) build_ledger.py fresh rebuild won't meet the <3GB target since it doesn't delete is_missing cells, (2) dead 'missing' filter in VIEW after cell deletion, (3) normalize_metric_slug duplication across files, (4) aggressive cache size for 8GB machine. Four shared state observations noted for the scrutiny validator to triage."
+}

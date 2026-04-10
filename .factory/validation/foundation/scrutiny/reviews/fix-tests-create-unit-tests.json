@@ -1,0 +1,56 @@
+{
+  "featureId": "fix-tests-create-unit-tests",
+  "reviewedAt": "2026-04-10T18:15:00.000Z",
+  "commitId": "0b5f55f",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Implementation fully covers all feature requirements: test_solve.py rewritten (no OfficeQASolver), 5 test files created in tests/ with 111 total tests all passing, __import__ removed from safe_builtins, math/statistics/re/numpy pre-injected into exec namespace. Security hardening is correct. Tests are well-structured with good coverage of happy paths, edge cases, and error handling. Code follows project conventions.",
+    "issues": [
+      {
+        "file": "compute.py",
+        "line": 161,
+        "severity": "non_blocking",
+        "description": "format_result() with rounding='integer' returns '3.0' instead of '3' because Python's round(x, 0) returns a float. This is correct Python behavior and the tests match, but may cause subtle mismatches downstream if reward.py expects '3' for integer-rounded results. The fuzzy_match_answer numeric matching likely handles this, but worth noting."
+      },
+      {
+        "file": "tests/test_compute.py",
+        "line": 157,
+        "severity": "non_blocking",
+        "description": "test_safe_builtins_no_import checks via source code inspection (string search in function source) rather than inspecting the actual safe_builtins dict at runtime. This is fragile if the code is refactored. However, test_dunder_import_blocked and test_import_blocked provide runtime verification, so functional coverage is adequate."
+      },
+      {
+        "file": "tests/test_ledger.py",
+        "line": 117,
+        "severity": "non_blocking",
+        "description": "test_row_counts_stable verifies counts are positive and table_rows >= tables, but doesn't actually verify idempotency by running build_ledger.py twice. This is a reasonable pragmatic choice (build_ledger.py takes minutes) but the test name slightly overpromises — it's more of a 'row_counts_sane' check."
+      },
+      {
+        "file": "tests/test_extraction.py",
+        "line": 111,
+        "severity": "non_blocking",
+        "description": "test_build_context_budget_limit asserts len(ctx) <= 600 for a char_budget=500. The 100-char slack is a reasonable approximation but is somewhat arbitrary. If the rendering changes, this test could become fragile."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The pipeline-worker skill specifies TDD (Step 2: 'Write Tests First', 'Run tests to confirm tests FAIL (red phase)'). The transcript shows the worker wrote all test files and implementation in one batch, then fixed failures — not strict red-green TDD. The deviation is justified since these are new files (no existing code to test against first), and the result is equivalent. The skill's TDD mandate may be overly strict for 'create new test files' features vs 'modify existing code' features.",
+      "evidence": "Transcript skeleton shows: Create test_solve.py, tests/test_compute.py, tests/test_reward.py, tests/test_extraction.py, tests/test_retrieval.py, tests/test_ledger.py all in one parallel batch, then Execute pytest. Worker's skillFeedback.followedProcedure=true, deviations=[]."
+    },
+    {
+      "area": "conventions",
+      "observation": "Worker added '# nosec B102' annotation to the exec() call in compute.py to satisfy a bandit pre-commit hook. This annotation pattern is not documented in AGENTS.md. Future workers modifying compute.py should know about the bandit pre-commit hook and the nosec convention.",
+      "evidence": "compute.py:140 — exec(template, {\"__builtins__\": safe_builtins}, local_vars)  # nosec B102. Pre-commit hook caught this during first commit attempt per transcript."
+    },
+    {
+      "area": "conventions",
+      "observation": "Worker discovered that .pre-commit-config.yaml has ruff-format and bandit hooks that auto-reformat code and block security-flagged patterns. This pre-commit configuration is not documented in AGENTS.md or services.yaml, which only list 'uv run ruff check .' and 'uv run pyright' as lint/typecheck commands.",
+      "evidence": "Transcript shows commit failed first time due to ruff-format reformatting files and bandit flagging exec(). Worker had to re-stage and re-commit."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. All feature requirements fully met: test_solve.py rewritten without OfficeQASolver (confirmed via grep), 5 new test files with 111 total passing tests (exceeding 20-test target), __import__ removed from compute.py safe_builtins, math/statistics/re/numpy pre-injected into exec namespace. Security hardening verified both via source inspection and runtime tests (import os and __import__('os') both blocked). Four non-blocking issues identified: format_result integer rounding returns float string, source-inspection-based security test, test name slight overpromise on idempotency, and magic number in budget test. Three shared state observations: TDD deviation justified for new-file creation, undocumented nosec annotation pattern, and undocumented pre-commit hooks."
+}
