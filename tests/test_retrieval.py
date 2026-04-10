@@ -927,8 +927,7 @@ def test_retrieve_zero_results_returns_empty_list():
     # Must return an empty list, not None, not an exception
     assert entries is not None, "retrieve() must not return None"
     assert isinstance(entries, list), "retrieve() must return a list"
-    # For a completely bogus query, expect empty or very few results
-    # The key guarantee is: no exception raised, and result is a list (possibly empty)
+    assert entries == [], "retrieve() must return empty list for completely bogus query"
 
 
 @skip_no_ledger
@@ -945,9 +944,10 @@ def test_retrieve_zero_results_both_channels_empty():
         load_html=False,
     )
     # The guarantee is: returns a list (not None, not exception).
-    # May be empty or have a few FTS hits, but never crashes.
+    # For a completely bogus query with no data_requests, must return empty list.
     assert entries is not None
     assert isinstance(entries, list)
+    assert entries == [], "retrieve() must return empty list when both channels empty"
 
 
 @skip_no_ledger
@@ -955,14 +955,15 @@ def test_retrieve_zero_results_null_plan():
     """When plan is None, retrieve() returns empty list (not None/exception)."""
     entries = retrieve(
         None,
-        "xyzzy_nonexistent_query_no_plan",
+        "xyzzy_fhqwhgads_plugh_bogus_nonexistent_99999_null",
         top_k=5,
         load_html=False,
     )
     assert entries is not None
     assert isinstance(entries, list)
     # With None plan, _extract_hints returns [], so no hints → no metric channel,
-    # but FTS still runs from question tokens. Still, a bogus question may return [].
+    # but FTS still runs from question tokens. A completely bogus question must return [].
+    assert entries == [], "retrieve() must return empty list for null plan + bogus query"
 
 
 def test_retrieve_no_parseable_years_uses_unfiltered_fts():

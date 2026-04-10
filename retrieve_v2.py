@@ -1245,10 +1245,9 @@ def retrieve(
             year_mode,
         )
         # Period-aware scoring: boost matching period, penalize mismatched.
-        # Scaled by 0.2 to prevent the period signal from dominating — many
-        # tables contain both FY and CY data despite being labeled with one
-        # period, so the raw delta would incorrectly demote correct tables.
-        s += 0.2 * _period_aware_score_delta(year_mode, row["period"])
+        # Full delta applied (+0.5 match, -0.3 mismatch) for meaningful
+        # period discrimination. Unknown mode or empty period → 0.0.
+        s += _period_aware_score_delta(year_mode, row["period"])
         if direct_files and row["file"] in direct_files:
             s += 5.0
         reranked.append((s, row))
@@ -1392,7 +1391,7 @@ def retrieve(
             )
             pf_added += 1
 
-    return entries
+    return entries[:top_k]
 
 
 def retrieve_from_question(question: str, top_k: int = 10) -> list[dict]:
