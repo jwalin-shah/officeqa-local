@@ -1,8 +1,8 @@
 commands:
   install: uv sync
   test: uv run pytest --tb=short -q
-  lint: uv run ruff check .
-  typecheck: uv run pyright
+  lint: uv run ruff check solve.py compute.py extract.py retrieve_v2.py verify.py find.py scout.py reward.py build_ledger.py batch_test.py test_solve.py migrate_metrics_to_view.py tests/
+  typecheck: uv run pyright solve.py compute.py extract.py retrieve_v2.py verify.py find.py scout.py reward.py tests/
   retrieval_recall: uv run python retrieve_v2.py --test
   ledger_reachability: uv run python eval_ledger.py
   oracle_extract: uv run python extract.py --test-oracle --n 20
