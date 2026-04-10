@@ -36,6 +36,15 @@ client = OpenAI(
     base_url=os.getenv("DEDALUS_API_BASE"),
 )
 
+# ── Retry bounds ────────────────────────────────────────────────────────────
+# Max retries per phase (decompose / extract / verify). Each retry is one
+# additional LLM call.  Initial call + MAX_RETRIES_PER_PHASE retries per phase.
+MAX_RETRIES_PER_PHASE = 2
+# Absolute cap on total LLM calls per question (decompose + extract + verify
+# across all attempts).  Prevents runaway costs on adversarial or ambiguous
+# questions.  6 = 2 decompose + 2 extract + 2 verify in the worst case.
+MAX_LLM_CALLS = 6
+
 # ── Ledger connection for deterministic fast-path ───────────────────────────
 
 _LEDGER_PATH = Path(__file__).parent / "ledger.sqlite"
@@ -755,6 +764,7 @@ def _run_extract_and_compute(
     question: str,
     verbose: bool,
     feedback: str = "",
+    llm_counter: dict | None = None,
 ) -> tuple[str, dict | None]:
     """Run extract → validate → compute for one attempt. Returns
     (formatted_answer_or_error, extraction_dict_or_None). The extraction is
@@ -764,6 +774,11 @@ def _run_extract_and_compute(
     attempts to look up values directly from the ledger without LLM. Resolved
     DRs are used directly; unresolved DRs fall through to LLM extraction.
     When all DRs resolve deterministically, the LLM extract step is skipped.
+
+    ``llm_counter`` is an optional mutable dict {"count": int} used by solve()
+    to enforce the MAX_LLM_CALLS budget.  When extract_structured() actually
+    invokes the LLM (i.e. the fast-path didn't cover all DRs), the counter is
+    incremented by 1.
     """
     # ── Deterministic fast-path ─────────────────────────────────────────
     resolved_extractions, unresolved_ids = _try_deterministic_fast_path(
@@ -794,6 +809,12 @@ def _run_extract_and_compute(
         # Filter per_dr_entries to only unresolved DRs
         filtered_per_dr = {k: v for k, v in per_dr_entries.items() if k in unresolved_ids}
 
+        # Check LLM budget before calling extract
+        if llm_counter is not None and llm_counter["count"] >= MAX_LLM_CALLS:
+            if verbose:
+                print("  LLM budget exhausted — skipping extract")
+            return "EXTRACT_FAILED", None
+
         llm_extraction = extract_structured(
             filtered_spec,
             filtered_per_dr,
@@ -801,6 +822,9 @@ def _run_extract_and_compute(
             verbose=verbose,
             feedback=feedback,
         )
+        # Count the LLM call if extract_structured actually hit the LLM
+        if llm_counter is not None and llm_extraction is not None:
+            llm_counter["count"] += 1
 
         # Merge: deterministic results + LLM results
         merged_extractions = dict(resolved_extractions)  # copy deterministic
@@ -844,15 +868,36 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
       - verify flags extract   → re-extract with the issue as feedback
       - verify flags decompose → re-decompose + retrieve + extract again
 
+    Retries are bounded by MAX_RETRIES_PER_PHASE (per phase) and MAX_LLM_CALLS
+    (total across all phases for one question).  No infinite loop is possible.
+
     Each phase still fails loudly with an explicit error string so eval
     output tells us exactly which stage broke.
     """
+    # LLM call counter — tracks calls to decompose, extract_structured,
+    # and verify_answer to enforce MAX_LLM_CALLS bound.
+    llm_calls = {"count": 0}
+
+    def _bump_llm(phase: str) -> bool:
+        """Increment LLM counter. Return True if budget remains, False if exceeded."""
+        llm_calls["count"] += 1
+        if llm_calls["count"] > MAX_LLM_CALLS:
+            if verbose:
+                print(
+                    f"  LLM budget exhausted ({llm_calls['count']}/{MAX_LLM_CALLS}) "
+                    f"at {phase} — stopping retries"
+                )
+            return False
+        return True
+
     # Phase 0: scout (deterministic, cheap, grounds decompose)
     hint = scout(question)
     if verbose and hint:
         print(f"  Scout hint:\n{hint[:400]}")
 
     # Phase 1: decompose (with one retry on empty retrieve)
+    if not _bump_llm("decompose"):
+        return "DECOMPOSE_FAILED"
     spec = decompose(question, scout_hint=hint)
     if spec is None:
         return "DECOMPOSE_FAILED"
@@ -865,6 +910,8 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
     if verbose:
         print(f"  Retrieve: {total} table entries across {len(per_dr)} data_requests")
     if total == 0:
+        if not _bump_llm("decompose(retry)"):
+            return "RETRIEVE_EMPTY"
         if verbose:
             print("  No tables matched — retrying decompose with feedback")
         spec = decompose(
@@ -883,7 +930,12 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
             return "RETRIEVE_EMPTY"
 
     # Phase 3+4: extract → compute (first attempt)
-    answer, extraction = _run_extract_and_compute(spec, per_dr, question, verbose)
+    # extract_structured is called inside _run_extract_and_compute — we
+    # count it as one LLM call when it actually invokes the LLM (i.e. when
+    # the deterministic fast-path doesn't cover all DRs).
+    answer, extraction = _run_extract_and_compute(
+        spec, per_dr, question, verbose, llm_counter=llm_calls
+    )
 
     # Bounce-back: if extract came back with nothing, retry extract once with
     # the missing-value ids as feedback, then if still empty, re-decompose.
@@ -902,8 +954,11 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
             question,
             verbose,
             feedback=missing_feedback,
+            llm_counter=llm_calls,
         )
         if extraction is not None and answer.startswith("NO_VALUES"):
+            if not _bump_llm("decompose(no_values_retry)"):
+                return answer
             if verbose:
                 print(f"  {answer} — retrying decompose")
             spec2 = decompose(
@@ -923,6 +978,7 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
                         per_dr2,
                         question,
                         verbose,
+                        llm_counter=llm_calls,
                     )
                     if extraction is not None:
                         spec = spec2
@@ -939,6 +995,11 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
 
     # Determine source unit from retrieval entries for auto-fix
     source_unit = _determine_source_unit(per_dr)
+    if not _bump_llm("verify"):
+        # Budget exhausted — return current answer without verification
+        if verbose:
+            print(f"  Answer (unverified): {answer}")
+        return answer
     verdict = verify_answer(
         question,
         spec,
@@ -975,6 +1036,7 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
             question,
             verbose,
             feedback=issue,
+            llm_counter=llm_calls,
         )
         if extraction2 is not None and not answer2.startswith(
             ("EXTRACT_FAILED", "NO_VALUES", "COMPUTE_FAILED")
@@ -982,6 +1044,10 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
             answer = answer2
 
     elif phase == "decompose":
+        if not _bump_llm("decompose(verify_retry)"):
+            if verbose:
+                print(f"  Answer (decompose retry budget exhausted): {answer}")
+            return answer
         if verbose:
             print(f"  Verify flagged decompose: {issue}")
         spec2 = decompose(question, scout_hint=hint, feedback=issue)
@@ -993,6 +1059,7 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
                     per_dr2,
                     question,
                     verbose,
+                    llm_counter=llm_calls,
                 )
                 if extraction2 is not None and not answer2.startswith(
                     ("EXTRACT_FAILED", "NO_VALUES", "COMPUTE_FAILED")

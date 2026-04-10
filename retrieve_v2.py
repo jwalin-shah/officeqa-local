@@ -503,6 +503,7 @@ def _period_aware_score_delta(year_mode: str, table_period: str | None) -> float
 
 _LEDGER_TLS = threading.local()
 _JSON_ELEMENT_CACHE: dict[str, dict[int, dict]] = {}
+_JSON_ELEMENT_CACHE_LOCK = threading.Lock()
 
 
 def _ledger_conn() -> sqlite3.Connection:
@@ -520,7 +521,9 @@ def _load_element_html(file: str, element_seq: int) -> str:
     """Fetch a table element's HTML from corpus_json on demand.
 
     Cached per file because a single query's top-k is likely to hit the
-    same bulletin repeatedly for year-comparison questions."""
+    same bulletin repeatedly for year-comparison questions. Thread-safe:
+    uses a lock around cache writes so parallel eval workers don't corrupt
+    the shared dict."""
     cache = _JSON_ELEMENT_CACHE.get(file)
     if cache is None:
         path = Path("corpus_json") / file
@@ -531,7 +534,12 @@ def _load_element_html(file: str, element_seq: int) -> str:
         for idx, el in enumerate(doc.get("document", {}).get("elements", [])):
             if el.get("type") == "table":
                 cache[idx] = el
-        _JSON_ELEMENT_CACHE[file] = cache
+        with _JSON_ELEMENT_CACHE_LOCK:
+            # Double-check: another thread may have populated it
+            if file not in _JSON_ELEMENT_CACHE:
+                _JSON_ELEMENT_CACHE[file] = cache
+            else:
+                cache = _JSON_ELEMENT_CACHE[file]
     el = cache.get(element_seq)
     return (el.get("content") or "") if el else ""
 
