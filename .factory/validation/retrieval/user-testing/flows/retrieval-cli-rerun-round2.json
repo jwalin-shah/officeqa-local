@@ -1,0 +1,85 @@
+{
+  "groupId": "retrieval-cli-rerun-round2",
+  "testedAt": "2026-04-10T19:57:07Z",
+  "isolation": {
+    "surface": "CLI command execution only",
+    "workingDirectory": "/Users/jwalinshah/projects/officeqa-local",
+    "sharedStateConstraints": [
+      "read-only behavior for corpus_json/",
+      "read-only behavior for corpus/",
+      "read-only behavior for officeqa_full.csv",
+      "read-only behavior for ledger.sqlite",
+      "did not run build_ledger.py"
+    ],
+    "executionMode": "sequential"
+  },
+  "toolsUsed": [
+    "Execute",
+    "Read",
+    "Grep",
+    "uv run python retrieve_v2.py --test"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-RETR-003",
+      "title": "Prose/footnote retrieval integrated",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Inspect retrieve_v2.py for prose/footnote channel queries and integration path",
+          "expected": "retrieve() queries prose_fts/footnotes_fts and integrates supplementary hits",
+          "observed": "_prose_footnote_channel queries prose_fts + footnotes_fts; retrieve() calls pf_hits = _prose_footnote_channel(...) and appends entries with retrieval_channel=\"prose_footnote\""
+        },
+        {
+          "action": "Verify returned prose/footnote entries include required metadata fields",
+          "expected": "Returned candidates include file, page_id, and content metadata",
+          "observed": "Runtime sample entries include file, page_id, content excerpt, near_table_id, and retrieval_strategy (prose_footnote:prose/footnote)"
+        },
+        {
+          "action": "Run full retrieval benchmark for contribution count evidence",
+          "expected": "Non-zero prose/footnote contributions on 246-question --test run",
+          "observed": "retrieve_v2.py --test summary reports prose/footnote contributions = 3/246 = 1.2%"
+        }
+      ],
+      "evidence": {
+        "terminalLogs": [
+          "retrieval/retrieval-cli-rerun-round2/VAL-RETR-006-retrieve-test.log",
+          "retrieval/retrieval-cli-rerun-round2/VAL-RETR-003-pf-runtime-sample.log"
+        ],
+        "artifacts": [
+          "retrieval/retrieval-cli-rerun-round2/VAL-RETR-003-code-snippets.txt"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-RETR-006",
+      "title": "Retrieval recall improved",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run uv run python retrieve_v2.py --test",
+          "expected": "Current recall metrics available for @1/@5/@10/@20/@30 on 246 questions",
+          "observed": "Current metrics: @1=7.7, @5=20.7, @10=27.6, @20=35.0, @30=39.0"
+        },
+        {
+          "action": "Compare current metrics with baseline_metrics.json under contract thresholds",
+          "expected": "recall@10 improves by >=2 points and no recall@K regresses by >1 point",
+          "observed": "Using retrieval_baseline_pre_improvement: deltas are @1 +1.2, @5 +1.6, @10 +2.0, @20 +3.3, @30 +3.2; threshold checks PASS"
+        }
+      ],
+      "evidence": {
+        "terminalLogs": [
+          "retrieval/retrieval-cli-rerun-round2/VAL-RETR-006-retrieve-test.log"
+        ],
+        "artifacts": [
+          "retrieval/retrieval-cli-rerun-round2/VAL-RETR-006-threshold-check.txt"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 2 assertions (VAL-RETR-003, VAL-RETR-006): both passed on rerun with non-zero prose/footnote contributions and recall thresholds satisfied versus baseline."
+}

@@ -1,0 +1,19 @@
+{
+  "milestone": "retrieval",
+  "round": 2,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-RETR-003",
+    "VAL-RETR-006"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": ".factory/validation/retrieval/user-testing/synthesis.round1.json"
+}

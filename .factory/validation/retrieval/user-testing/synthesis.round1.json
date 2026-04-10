@@ -1,0 +1,38 @@
+{
+  "milestone": "retrieval",
+  "round": 1,
+  "status": "fail",
+  "assertionsSummary": {
+    "total": 8,
+    "passed": 6,
+    "failed": 2,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-RETR-001",
+    "VAL-RETR-002",
+    "VAL-RETR-004",
+    "VAL-RETR-005",
+    "VAL-RETR-007",
+    "VAL-RETR-008"
+  ],
+  "failedAssertions": [
+    {
+      "id": "VAL-RETR-003",
+      "reason": "Contract requires non-zero prose/footnote contributions on --test; observed 0/246."
+    },
+    {
+      "id": "VAL-RETR-006",
+      "reason": "Recall-improvement contract not met on current repository state."
+    }
+  ],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Documented that retrieve_v2.py strategy evidence should use per-question via=... output because --verbose is not exposed.",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}
