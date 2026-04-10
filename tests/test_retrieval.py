@@ -1,16 +1,19 @@
 """Tests for retrieve_v2.py — FTS channel, metric channel, edge cases."""
 
 import sqlite3
+from typing import Any, cast
 
 import pytest
 
 from retrieve_v2 import (
     LEDGER_PATH,
     _detect_wants_monthly,
+    _expand_synonyms,
     _extract_hints,
     _file_year_bonus,
     _fts_channel,
     _metric_channel,
+    _row_hint_variants,
     content_tokens,
     detect_year_mode,
     normalize_metric_slug,
@@ -83,6 +86,25 @@ def test_normalize_metric_slug():
     assert normalize_metric_slug("Net interest (on debt)") == "net interest on debt"
     assert normalize_metric_slug(None) == ""
     assert normalize_metric_slug("") == ""
+
+
+def test_expand_synonyms_includes_arena_terms():
+    expanded = _expand_synonyms(
+        ["expenditures", "defense", "veterans"],
+        "total expenditures for national defense and veterans",
+    )
+    assert "outlays" in expanded
+    assert "spending" in expanded
+    assert "military" in expanded
+    assert "national defense" in expanded
+    assert "veterans affairs" in expanded
+
+
+def test_row_hint_variants_expand_phrases():
+    variants = _row_hint_variants("Veterans administration")
+    assert "veterans administration" in variants
+    assert "veterans affairs" in variants
+    assert "veterans" in variants
 
 
 # ── _extract_hints ───────────────────────────────────────────────────────────
@@ -168,6 +190,43 @@ def test_fts_channel_no_year_filter():
     assert len(rows) > 0
 
 
+def test_fts_channel_uses_synonyms_progressively():
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params):
+            query = params[0]
+            self.calls.append(query)
+            if "outlays" in query or "military" in query:
+                return [{"id": 2, "score": -1.0}]
+            return []
+
+    conn = cast(Any, FakeConn())
+    rows = _fts_channel(conn, ["expenditures", "defense"], [1940], False, top_n=5)
+    assert len(rows) == 1
+    assert any("outlays" in call or "military" in call for call in conn.calls)
+    assert len(conn.calls) >= 2
+
+
+def test_fts_channel_skips_synonyms_when_exact_hits_enough():
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params):
+            query = params[0]
+            self.calls.append(query)
+            if "outlays" in query or "military" in query:
+                raise AssertionError("synonym query should not run when exact hits are sufficient")
+            return [{"id": i, "score": -1.0 - i} for i in range(8)]
+
+    conn = cast(Any, FakeConn())
+    rows = _fts_channel(conn, ["expenditures", "defense"], [1940], False, top_n=8)
+    assert len(rows) == 8
+    assert len(conn.calls) == 1
+
+
 # ── Metric channel (requires ledger.sqlite) ──────────────────────────────────
 
 
@@ -194,6 +253,57 @@ def test_metric_channel_empty_metric():
     rows = _metric_channel(conn, "", "", "", [1940], False)
     conn.close()
     assert rows == []
+
+
+def test_metric_channel_uses_row_hint_synonyms_progressively():
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params):
+            self.calls.append(params[0])
+            if params[0] == "military expenditures":
+                return [{"id": 7, "score": -6.0}]
+            return []
+
+    conn = cast(Any, FakeConn())
+    rows = _metric_channel(
+        conn,
+        "expenditures",
+        "national defense",
+        "",
+        [1940],
+        False,
+        top_n=5,
+    )
+    assert len(rows) == 1
+    assert conn.calls[0] == "national defense expenditures"
+    assert "military expenditures" in conn.calls[1:]
+
+
+def test_metric_channel_skips_synonyms_when_exact_hits_enough():
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params):
+            self.calls.append(params[0])
+            if params[0] != "national defense expenditures":
+                raise AssertionError("synonym lookup should not run when exact hits are sufficient")
+            return [{"id": i, "score": -6.0 - i} for i in range(6)]
+
+    conn = cast(Any, FakeConn())
+    rows = _metric_channel(
+        conn,
+        "expenditures",
+        "national defense",
+        "",
+        [1940],
+        False,
+        top_n=6,
+    )
+    assert len(rows) == 6
+    assert conn.calls == ["national defense expenditures"]
 
 
 # ── Full retrieve (requires ledger.sqlite) ───────────────────────────────────
