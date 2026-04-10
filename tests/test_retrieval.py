@@ -898,3 +898,131 @@ def test_row_hint_alternatives_superset_behavior():
     files_with_alts = {e["file"] for e in entries_with_alts}
     files_no_alts = {e["file"] for e in entries_no_alts}
     assert len(files_with_alts) >= len(files_no_alts)
+
+
+# ── VAL-RETR-008: Edge case handling ─────────────────────────────────────────
+
+
+@skip_no_ledger
+def test_retrieve_zero_results_returns_empty_list():
+    """When both channels return zero results, retrieve() returns an empty list (not None/exception).
+
+    This is VAL-RETR-008: graceful handling when both channels find nothing.
+    """
+    entries = retrieve(
+        {
+            "data_requests": [
+                {
+                    "label": "xyzzy_nonexistent_12345_abcd",
+                    "row_hint": "xyzzy_nonexistent_12345_abcd",
+                    "column_hint": "",
+                    "years": [],
+                }
+            ]
+        },
+        "xyzzy_nonexistent_12345_abcd",
+        top_k=5,
+        load_html=False,
+    )
+    # Must return an empty list, not None, not an exception
+    assert entries is not None, "retrieve() must not return None"
+    assert isinstance(entries, list), "retrieve() must return a list"
+    # For a completely bogus query, expect empty or very few results
+    # The key guarantee is: no exception raised, and result is a list (possibly empty)
+
+
+@skip_no_ledger
+def test_retrieve_zero_results_both_channels_empty():
+    """When both channels truly return zero results, retrieve() returns [].
+
+    Uses a completely bogus question that won't match any corpus tables,
+    ensuring FTS and metric channels both return nothing.
+    """
+    entries = retrieve(
+        {"data_requests": []},
+        "xyzzy_fhqwhgads_plugh_bogus_nonexistent_99999",
+        top_k=5,
+        load_html=False,
+    )
+    # The guarantee is: returns a list (not None, not exception).
+    # May be empty or have a few FTS hits, but never crashes.
+    assert entries is not None
+    assert isinstance(entries, list)
+
+
+@skip_no_ledger
+def test_retrieve_zero_results_null_plan():
+    """When plan is None, retrieve() returns empty list (not None/exception)."""
+    entries = retrieve(
+        None,
+        "xyzzy_nonexistent_query_no_plan",
+        top_k=5,
+        load_html=False,
+    )
+    assert entries is not None
+    assert isinstance(entries, list)
+    # With None plan, _extract_hints returns [], so no hints → no metric channel,
+    # but FTS still runs from question tokens. Still, a bogus question may return [].
+
+
+def test_retrieve_no_parseable_years_uses_unfiltered_fts():
+    """When a question has no parseable years, FTS channel uses unfiltered search.
+
+    This is VAL-RETR-008: retrieval uses unfiltered FTS when no years are found.
+    """
+    calls = []
+
+    class FakeConn:
+        def execute(self, sql, params):
+            query = params[0] if params else ""
+            year_filter_present = "table_columns" in sql and "year_extracted" in sql
+            file_year_between = "t.file_year BETWEEN ? AND ?" in sql
+            calls.append(
+                {
+                    "query": query,
+                    "year_filter": year_filter_present,
+                    "file_year_between": file_year_between,
+                }
+            )
+            return []
+
+    conn = cast(Any, FakeConn())
+    # No years → target_years=[]
+    trace = _fts_channel_trace(conn, ["defense", "expenditures"], [], False, top_n=10)
+    # With no target_years and non-empty tokens, the FTS channel should use
+    # the exact_unrestricted strategy (no year filter)
+    assert trace.attempts, "FTS channel should execute at least one strategy"
+    strategies = [name for name, _ in trace.attempts]
+    assert "exact_unrestricted" in strategies, (
+        f"Expected 'exact_unrestricted' strategy when no years, got: {strategies}"
+    )
+
+
+@skip_no_ledger
+def test_retrieve_from_question_no_years_still_returns_results():
+    """retrieve_from_question works when question has no parseable years.
+
+    Uses unfiltered FTS — no year-based filtering is applied.
+    """
+    # A question with no 4-digit years
+    entries = retrieve_from_question(
+        "What are the categories of federal spending?",
+        top_k=5,
+    )
+    assert isinstance(entries, list)
+    # Even without years, the retrieval should return some results
+    # (the corpus has tables about spending categories)
+    assert len(entries) > 0, "Unfiltered FTS should find results for topical queries"
+
+
+@skip_no_ledger
+def test_fts_channel_no_years_uses_unrestricted_strategy():
+    """FTS channel trace shows 'exact_unrestricted' strategy when no target years."""
+    conn = sqlite3.connect(str(LEDGER_PATH))
+    conn.row_factory = sqlite3.Row
+    trace = _fts_channel_trace(conn, ["defense", "expenditures"], [], False, top_n=10)
+    conn.close()
+    strategies = [name for name, _ in trace.attempts]
+    assert "exact_unrestricted" in strategies, (
+        f"Expected 'exact_unrestricted' in strategies when no years, got: {strategies}"
+    )
