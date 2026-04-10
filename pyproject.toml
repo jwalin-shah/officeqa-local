@@ -1,0 +1,50 @@
+[project]
+name = "officeqa-local"
+version = "0.1.0"
+description = "OfficeQA Solver - Treasury Bulletin data extraction"
+requires-python = ">=3.12"
+dependencies = [
+    "anyio>=4.13.0",
+    "instructor>=1.12.0",
+    "lxml>=6.0.3",
+    "numpy>=2.4.4",
+    "openai>=1.0.0,<2.0.0",
+    "pandas>=3.0.2",
+    "pint>=0.25.3",
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.0.0",
+    "rapidfuzz>=3.14.5",
+    "scipy>=1.17.1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+reportMissingImports = true
+reportUnusedImports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=. --cov-report=term-missing"
+
+[tool.bandit]
+exclude_dirs = [".venv", "tests"]
+skips = ["B101", "B404", "B110", "B112", "B603", "B607"]
+
+[dependency-groups]
+dev = [
+    "bandit>=1.9.4",
+    "pre-commit>=4.5.1",
+    "pyright>=1.1.408",
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.10",
+]

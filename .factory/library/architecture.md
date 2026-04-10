@@ -38,8 +38,9 @@ The arena's best systems used: deterministic ingestion → structured extraction
 - ✅ Vertical serialization (extract)
 - ✅ Synonym expansion + multi-strategy search (retrieve)
 - ✅ Deterministic fast-path cell resolution (extract → solve.py)
+- ✅ Pre-extracted monthly values (extract) — pre-extracts 12 monthly values for CY sum questions
+- ✅ CY row filtering (extract) — suppresses annual/FY rows from extraction context
 - Mentor/review verification pattern (verify) — pending
-- Pre-extracted monthly values (extract) — pending
 
 ## Deterministic Fast-Path Details
 The fast-path in `_run_extract_and_compute()` attempts to resolve all data_requests using `resolve_cells()` from find.py before falling back to LLM extraction.
@@ -63,3 +64,17 @@ The fast-path in `_run_extract_and_compute()` attempts to resolve all data_reque
 - External/CPI/FX source DRs automatically fail (can't resolve from ledger)
 - Prose/footnote entries are skipped (no table to resolve from)
 - Currently the fast-path is all-or-nothing: if any DR fails, all DRs go to LLM
+
+## Monthly Pre-Extraction & CY Row Filtering
+
+Two extraction improvements in `extract.py` that reduce LLM extraction errors for calendar-year sum questions:
+
+**CY Row Filtering** (`filter_cy_rows()`): When `granularity='monthly_all'`, suppresses annual total rows (bare year like "1940") and fiscal-year summary rows ("Fiscal year 1940") from the rendered context. Prevents the LLM from picking the wrong total when it should sum 12 monthly values. Works on both pipe-delimited and vertical format.
+
+**Monthly Pre-Extraction** (`pre_extract_monthly_values()`): When `granularity='monthly_all'` AND `computation='sum'`, parses the rendered table context for 12 monthly values and prepends an annotation:
+```
+PRE-EXTRACTED MONTHLY VALUES for CY YYYY: [v1, v2, ..., v12] (Count: 12 — sum for calendar year total)
+```
+Two parsing strategies: (1) vertical format with `(month N): value` annotations, (2) pipe format with months as rows. Row-hint matching ensures the correct category is extracted when multiple ROW entries exist.
+
+**Integration in `extract_structured()`**: Both features are applied per-DR in the context-building loop. Row filtering happens first, then pre-extraction is attempted on the filtered context. The annotation is prepended to the context before sending to the LLM.

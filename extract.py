@@ -7,6 +7,7 @@ Strategy:
 3. Send focused context (header + matched sub-section) to LLM
 """
 
+import contextlib
 import os
 import re
 import subprocess
@@ -966,6 +967,265 @@ Output ONLY valid JSON matching this schema:
 }"""
 
 
+# ── CY Row Filtering (VAL-EXTR-005) ─────────────────────────────────────────
+
+
+def _is_annual_or_fy_label(label: str) -> bool:
+    """Check if a row label represents an annual or fiscal-year summary row.
+
+    Matches:
+    - Bare 4-digit year: "1940"
+    - "Fiscal year YYYY" / "FY YYYY" / "Fiscal YYYY"
+    """
+    label = label.strip()
+    return bool(
+        re.match(r"^\d{4}$", label)
+        or re.match(r"^(Fiscal\s+year|FY|Fiscal)\s+\d{4}", label, re.IGNORECASE)
+    )
+
+
+def filter_cy_rows(text: str, granularity: str) -> str:
+    """Filter annual/FY summary rows from rendered context for CY questions.
+
+    When granularity='monthly_all', removes rows where the label is a bare
+    year (e.g., "1940") or a fiscal-year designation (e.g., "Fiscal year 1940").
+    Only monthly data rows are kept, preventing the LLM from picking the wrong
+    total.
+
+    Handles both pipe-delimited and vertical serialization formats.
+    For other granularities, returns text unchanged.
+    """
+    if granularity != "monthly_all" or not text:
+        return text
+
+    lines = text.split("\n")
+    filtered: list[str] = []
+    in_filtered_row = False  # tracking vertical ROW entries to skip
+
+    for line in lines:
+        stripped = line.strip()
+
+        # ── Vertical format: check ROW entries ──────────────────────────
+        if stripped.startswith("ROW:"):
+            row_label = stripped[4:].strip()
+            if _is_annual_or_fy_label(row_label):
+                in_filtered_row = True
+                continue  # skip this ROW line
+            else:
+                in_filtered_row = False  # new ROW is not filtered
+
+        # Skip value lines under a filtered vertical ROW
+        if in_filtered_row:
+            if line.startswith("  "):  # indented value line
+                continue
+            elif stripped == "":
+                # Blank line may or may not be inside filtered ROW —
+                # treat as boundary to stop skipping
+                in_filtered_row = False
+            else:
+                # Non-indented, non-blank line — end of filtered ROW values
+                in_filtered_row = False
+
+        # ── Pipe format: check first cell ──────────────────────────────
+        if "|" in stripped and not in_filtered_row:
+            cells = _split_pipe_line(stripped)
+            if cells and _is_annual_or_fy_label(cells[0]):
+                continue
+
+        filtered.append(line)
+
+    return "\n".join(filtered)
+
+
+# ── Monthly Pre-Extraction (VAL-EXTR-004) ──────────────────────────────────
+
+
+def _split_pipe_line(line: str) -> list[str]:
+    """Split a pipe-delimited line into cells, removing empty edge cells."""
+    cells = [c.strip() for c in line.split("|")]
+    if cells and cells[0] == "":
+        cells = cells[1:]
+    if cells and cells[-1] == "":
+        cells = cells[:-1]
+    return cells
+
+
+def _detect_month_from_label(label: str, target_year: int | None) -> int | None:
+    """Detect calendar month index from a row label.
+
+    Patterns handled:
+    - "1940-January" → 1 (when target_year matches)
+    - "1940 January" → 1
+    - "January" / "Jan." → 1
+    Returns None if label doesn't look like a month row.
+    """
+    label = label.strip().lower()
+
+    # Year-month pattern: "1940-January", "1940 January"
+    if target_year:
+        for month_name, idx in _CALENDAR_MONTHS.items():
+            prefix_dash = f"{target_year}-{month_name}"
+            prefix_space = f"{target_year} {month_name}"
+            if label.startswith(prefix_dash) or label.startswith(prefix_space):
+                return idx
+
+    # Bare month name: "January", "Feb.", "mar"
+    # Avoid matching year-prefixed labels for wrong years
+    if not re.match(r"^\d{4}", label):
+        for month_name, idx in _CALENDAR_MONTHS.items():
+            if label == month_name or label.startswith(month_name):
+                return idx
+
+    return None
+
+
+def _parse_vertical_monthly_values(text: str, row_hint: str = "") -> list[float] | None:
+    """Parse vertical-format rendered text for 12 monthly values with month
+    annotations.
+
+    Looks for patterns like "Jan. (month 1): 132" under ROW entries
+    matching the optional row_hint. Returns list of 12 floats in month
+    order, or None if all 12 can't be found.
+    """
+    month_values: dict[int, float] = {}
+    in_target_row = True  # by default, accept any ROW
+
+    for line in text.split("\n"):
+        stripped = line.strip()
+
+        # Track which ROW we're in
+        if stripped.startswith("ROW:"):
+            row_label = stripped[4:].strip().lower()
+            if row_hint:
+                hint_lower = row_hint.lower()
+                in_target_row = hint_lower in row_label or row_label in hint_lower
+            else:
+                in_target_row = True
+
+        if in_target_row:
+            # Match "(month N): value" pattern
+            m = re.match(r".*\(month\s+(\d+)\):\s*([0-9,.\-]+)", stripped)
+            if m:
+                month_idx = int(m.group(1))
+                val_str = m.group(2)
+                val = to_num(val_str)
+                if val is not None and 1 <= month_idx <= 12:
+                    month_values[month_idx] = val
+
+    if len(month_values) == 12:
+        return [month_values[i] for i in range(1, 13)]
+    return None
+
+
+def _parse_pipe_monthly_row_values(text: str, dr: dict) -> list[float] | None:
+    """Parse pipe-delimited text where months are ROWS (not columns).
+
+    Looks for rows like:
+      | 1940-January | 132 | ...
+      | February | 129 | ...
+    Identifies the target column by matching the DR's row_hint against column
+    headers, then extracts values from monthly rows.
+    """
+    row_hint = (dr.get("row_hint") or "").lower()
+    years = dr.get("years") or []
+    target_year = years[0] if years else None
+
+    lines = text.split("\n")
+
+    # Find the target column index by matching row_hint in header cells
+    target_col_idx: int | None = None
+
+    for line in lines:
+        if "|" not in line:
+            continue
+        cells = _split_pipe_line(line)
+        if not cells:
+            continue
+
+        for j, cell in enumerate(cells):
+            cell_lower = cell.lower().strip()
+            if row_hint and (row_hint in cell_lower or cell_lower in row_hint):
+                target_col_idx = j
+                break
+
+        if target_col_idx is not None:
+            break
+
+    if target_col_idx is None:
+        return None
+
+    # Extract values from monthly rows
+    month_values: dict[int, float] = {}
+
+    for line in lines:
+        if "|" not in line:
+            continue
+        cells = _split_pipe_line(line)
+        if not cells:
+            continue
+
+        first_cell = cells[0].strip()
+        month_idx = _detect_month_from_label(first_cell, target_year)
+        if month_idx is not None and target_col_idx < len(cells):
+            val = to_num(cells[target_col_idx])
+            if val is not None:
+                month_values[month_idx] = val
+
+    if len(month_values) == 12:
+        return [month_values[i] for i in range(1, 13)]
+    return None
+
+
+def _format_value_list(values: list[float]) -> str:
+    """Format a list of numeric values for the pre-extraction annotation."""
+    parts: list[str] = []
+    for v in values:
+        if v == int(v):
+            parts.append(str(int(v)))
+        else:
+            parts.append(str(v))
+    return "[" + ", ".join(parts) + "]"
+
+
+def pre_extract_monthly_values(text: str, dr: dict, spec: dict) -> str | None:
+    """Pre-extract monthly values from rendered context for CY sum questions.
+
+    When granularity='monthly_all' and computation='sum', parses the rendered
+    table text for 12 monthly values and returns an annotation:
+
+        PRE-EXTRACTED MONTHLY VALUES for CY YYYY: [v1, v2, ..., v12]
+        (Count: 12 — sum for calendar year total)
+
+    Works by parsing the rendered text — no database access required.
+    Returns None if values can't be extracted or conditions aren't met.
+    """
+    granularity = dr.get("granularity", "")
+    computation = spec.get("computation", "")
+    years = dr.get("years") or []
+
+    if granularity != "monthly_all" or computation != "sum" or not years:
+        return None
+
+    target_year = years[0]
+    row_hint = dr.get("row_hint") or ""
+
+    # Strategy 1: Parse vertical format with month annotations
+    values = _parse_vertical_monthly_values(text, row_hint=row_hint)
+
+    # Strategy 2: Parse pipe format with months as rows
+    if not values:
+        values = _parse_pipe_monthly_row_values(text, dr)
+
+    if values and len(values) == 12:
+        return (
+            f"PRE-EXTRACTED MONTHLY VALUES for CY {target_year}: "
+            f"{_format_value_list(values)} "
+            f"(Count: 12 — sum for calendar year total)"
+        )
+
+    return None
+
+
 def extract_structured(
     spec: dict, per_dr_entries: dict, question: str, verbose: bool = False, feedback: str = ""
 ) -> dict | None:
@@ -990,14 +1250,23 @@ def extract_structured(
         dr_id = dr.get("id", "?")
         dr_label = dr.get("label", "")
         dr_years = [y for y in (dr.get("years") or [])]
+        granularity = dr.get("granularity", "?")
         entries = per_dr_entries.get(dr_id) or []
         ctx = build_context_from_entries(entries, char_budget=per_request_budget) if entries else ""
 
+        # Apply CY row filtering for monthly_all questions — suppress
+        # annual/FY summary rows so the LLM doesn't pick the wrong total
+        if ctx and granularity == "monthly_all":
+            ctx = filter_cy_rows(ctx, granularity)
+
         header = (
-            f"=== Context for {dr_id} ({dr_label}) — "
-            f"years={dr_years} granularity={dr.get('granularity', '?')} ==="
+            f"=== Context for {dr_id} ({dr_label}) — years={dr_years} granularity={granularity} ==="
         )
         if ctx:
+            # Try pre-extraction for monthly_all + sum DRs
+            annotation = pre_extract_monthly_values(ctx, dr, spec)
+            if annotation:
+                ctx = f"{annotation}\n\n{ctx}"
             per_request_context.append(f"{header}\n{ctx}")
             any_hit = True
         else:
@@ -1109,10 +1378,8 @@ if __name__ == "__main__":
         n = 20
         for i, a in enumerate(args):
             if a == "--n" and i + 1 < len(args):
-                try:
+                with contextlib.suppress(ValueError):
                     n = int(args[i + 1])
-                except ValueError:
-                    pass
         _test_oracle(n)
     elif args:
         print("Usage: uv run python extract.py --test-oracle [--n N]")
