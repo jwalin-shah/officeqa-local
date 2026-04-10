@@ -1,0 +1,26 @@
+{
+  "featureId": "retrieval-scrutiny-fixes",
+  "reviewedAt": "2026-04-10T19:38:40Z",
+  "commitId": "a2ce2a8fe16cf7bbef49e891141ef9a4b6d71e73",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Pass. The fix commit directly resolves all three previously blocking scrutiny findings: (1) restores the top_k contract by slicing final results, (2) removes 0.2 scaling so period-aware delta is applied at full +0.5/-0.3 strength, and (3) strengthens zero-result edge-case tests to assert exact empty-list behavior.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "Shared architecture docs are stale on retrieval channels: they still describe retrieve_v2 as two-channel despite shipped prose/footnote supplementary retrieval.",
+      "evidence": ".factory/library/architecture.md states \"Two-channel funnel: FTS (broad) + metric substring\"; mission AGENTS.md similarly describes \"two-channel retrieval (FTS + metric substring)\", while retrieval code includes prose/footnote channel."
+    },
+    {
+      "area": "knowledge",
+      "observation": "retrieval-improvements.md is stale after this fix: it documents period-aware reranking as scaled by 0.2x, but code now applies the raw delta directly.",
+      "evidence": ".factory/library/retrieval-improvements.md says \"Applied in reranking with a 0.2x scaling factor\"; retrieve_v2.py now uses `s += _period_aware_score_delta(year_mode, row[\"period\"])` (no 0.2 scaling)."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/retrieval/scrutiny/reviews/prose-footnote-retrieval.json; .factory/validation/retrieval/scrutiny/reviews/row-hint-alternatives-and-multi-request.json; .factory/validation/retrieval/scrutiny/reviews/retrieval-eval-and-edge-cases.json",
+  "summary": "Reviewed fix transcript skeleton, prior failure reviews, and both original/fix diffs. Commit a2ce2a8 adequately addresses all prior blocking issues with no new blocking defects found. Two shared-state documentation staleness observations were recorded."
+}
