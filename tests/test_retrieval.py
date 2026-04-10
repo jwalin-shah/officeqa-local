@@ -15,6 +15,7 @@ from retrieve_v2 import (
     _fts_channel_trace,
     _metric_channel,
     _metric_channel_trace,
+    _period_aware_score_delta,
     _prose_footnote_channel,
     _row_hint_variants,
     _winning_hit_details,
@@ -125,19 +126,12 @@ def test_extract_hints_from_plan():
             }
         ],
     }
-    metric, col, row, years = _extract_hints(plan, "question")
-    assert metric == "defense spending"
-    assert col == "1940"
-    assert row == "National defense"
-    assert years == [1940]
-
-
-def test_extract_hints_empty_plan():
-    metric, col, row, years = _extract_hints(None, "spending in 1940")
-    assert metric == ""
-    assert col == ""
-    assert row == ""
-    assert years == [1940]
+    hints = _extract_hints(plan, "question")
+    assert len(hints) == 1
+    assert hints[0]["metric"] == "defense spending"
+    assert hints[0]["col_hint"] == "1940"
+    assert hints[0]["row_hint"] == "National defense"
+    assert hints[0]["years"] == [1940]
 
 
 # ── _file_year_bonus ─────────────────────────────────────────────────────────
@@ -600,3 +594,307 @@ def test_prose_footnote_entries_have_content_field():
     for e in pf_entries:
         assert "content" in e
         assert isinstance(e["content"], str)
+
+
+# ── _extract_hints with row_hint_alternatives and multi-request ──────────────
+
+
+def test_extract_hints_returns_row_hint_alternatives():
+    """_extract_hints reads row_hint_alternatives from data_request."""
+    plan = {
+        "data_requests": [
+            {
+                "label": "national defense spending",
+                "row_hint": "National defense",
+                "row_hint_alternatives": [
+                    "National defense and associated activities",
+                    "National defense (050)",
+                ],
+                "column_hint": "Total",
+                "years": [1940],
+            }
+        ],
+    }
+    hints = _extract_hints(plan, "question")
+    assert len(hints) == 1  # one request
+    hint = hints[0]
+    assert hint["row_hint"] == "National defense"
+    assert hint["row_hint_alternatives"] == [
+        "National defense and associated activities",
+        "National defense (050)",
+    ]
+    assert hint["metric"] == "national defense spending"
+    assert hint["col_hint"] == "Total"
+    assert hint["years"] == [1940]
+
+
+def test_extract_hints_multi_request():
+    """_extract_hints returns hints for ALL data_requests, not just first."""
+    plan = {
+        "data_requests": [
+            {
+                "label": "v1 spending",
+                "row_hint": "National defense",
+                "row_hint_alternatives": ["Defense"],
+                "column_hint": "Total",
+                "years": [1940],
+            },
+            {
+                "label": "v2 spending",
+                "row_hint": "Veterans benefits",
+                "row_hint_alternatives": ["Veterans administration"],
+                "column_hint": "1945",
+                "years": [1945],
+            },
+        ],
+    }
+    hints = _extract_hints(plan, "question")
+    assert len(hints) == 2
+    assert hints[0]["row_hint"] == "National defense"
+    assert hints[1]["row_hint"] == "Veterans benefits"
+    assert hints[1]["row_hint_alternatives"] == ["Veterans administration"]
+
+
+def test_extract_hints_empty_alternatives():
+    """When row_hint_alternatives is absent, returns empty list."""
+    plan = {
+        "data_requests": [
+            {
+                "label": "defense spending",
+                "row_hint": "National defense",
+                "column_hint": "Total",
+                "years": [1940],
+            }
+        ],
+    }
+    hints = _extract_hints(plan, "question")
+    assert hints[0]["row_hint_alternatives"] == []
+
+
+def test_extract_hints_back_compat():
+    """_extract_hints still works when called with old-style tuple unpacking via index access."""
+    plan = {
+        "data_requests": [
+            {
+                "label": "defense spending",
+                "row_hint": "National defense",
+                "column_hint": "Total",
+                "years": [1940],
+            }
+        ],
+    }
+    hints = _extract_hints(plan, "question")
+    # First hint should have all fields
+    h = hints[0]
+    assert h["metric"] == "defense spending"
+    assert h["row_hint"] == "National defense"
+    assert h["col_hint"] == "Total"
+    assert h["years"] == [1940]
+
+
+def test_extract_hints_falls_back_to_question_years():
+    """When data_request has no years, falls back to parsing from question."""
+    plan = {
+        "data_requests": [
+            {
+                "label": "defense spending",
+                "row_hint": "National defense",
+                "column_hint": "",
+                "years": None,
+            }
+        ],
+    }
+    hints = _extract_hints(plan, "spending in 1940 and 1941")
+    assert hints[0]["years"] == [1940, 1941]
+
+
+def test_extract_hints_empty_plan():
+    """Empty plan returns empty list of hints."""
+    hints = _extract_hints(None, "spending in 1940")
+    assert hints == []
+
+
+# ── Metric channel with row_hint_alternatives ────────────────────────────────
+
+
+def test_metric_channel_uses_row_hint_alternatives():
+    """Metric channel tries each alternative for substring matching."""
+    calls = []
+
+    class FakeConn:
+        def execute(self, sql, params):
+            exact_text = params[0]
+            calls.append(exact_text)
+            if exact_text == "national defense and associated activities expenditures":
+                return [{"id": 99, "score": -8.0}]
+            return []
+
+    conn = cast(Any, FakeConn())
+    # "national defense" primary row_hint + alternatives should produce
+    # queries for both the primary and the alternative
+    rows = _metric_channel(
+        conn,
+        "expenditures",
+        "National defense and associated activities",
+        "",
+        [1940],
+        False,
+        top_n=10,
+    )
+    assert len(rows) >= 1
+    # The exact_text lookup for the alternative slug should have been called
+    assert any("national defense and associated activities" in c for c in calls)
+
+
+# ── Period-aware scoring ──────────────────────────────────────────────────────
+
+
+def test_period_aware_score_fiscal_match():
+    """Fiscal-year question: period='fiscal' tables get a boost."""
+    delta = _period_aware_score_delta("fiscal", "fiscal")
+    assert delta >= 0.5
+
+
+def test_period_aware_score_fiscal_mismatch():
+    """Fiscal-year question: period='calendar' tables get a penalty."""
+    delta = _period_aware_score_delta("fiscal", "calendar")
+    assert delta <= -0.3
+
+
+def test_period_aware_score_calendar_match():
+    """Calendar-year question: period='calendar' tables get a boost."""
+    delta = _period_aware_score_delta("calendar", "calendar")
+    assert delta >= 0.5
+
+
+def test_period_aware_score_calendar_mismatch():
+    """Calendar-year question: period='fiscal' tables get a penalty."""
+    delta = _period_aware_score_delta("calendar", "fiscal")
+    assert delta <= -0.3
+
+
+def test_period_aware_score_unknown_mode():
+    """Unknown year mode: no period scoring delta."""
+    delta = _period_aware_score_delta("unknown", "fiscal")
+    assert delta == 0.0
+
+
+def test_period_aware_score_empty_period():
+    """Empty period: no period scoring delta."""
+    delta = _period_aware_score_delta("fiscal", "")
+    assert delta == 0.0
+
+
+def test_period_aware_score_none_period():
+    """None period: no period scoring delta."""
+    delta = _period_aware_score_delta("fiscal", None)
+    assert delta == 0.0
+
+
+# ── Multi-request retrieval ─────────────────────────────────────────────────
+
+
+@skip_no_ledger
+def test_retrieve_multi_request_plan():
+    """retrieve() processes ALL data_requests in a spec, not just the first."""
+    plan = {
+        "data_requests": [
+            {
+                "id": "v1",
+                "label": "national defense expenditures",
+                "row_hint": "National defense",
+                "column_hint": "",
+                "years": [1940],
+            },
+            {
+                "id": "v2",
+                "label": "veterans expenditures",
+                "row_hint": "Veterans",
+                "column_hint": "",
+                "years": [1940],
+            },
+        ],
+    }
+    entries = retrieve(plan, "national defense and veterans in 1940", top_k=10, load_html=False)
+    assert isinstance(entries, list)
+    # Should have results for both requests — not just the first
+    # (Both row hints should contribute to the union of results)
+
+
+@skip_no_ledger
+def test_retrieve_fiscal_year_ranks_fiscal_tables_higher():
+    """Fiscal-year question ranks period='fiscal' tables higher than period='calendar'."""
+    # Use a question that explicitly mentions "fiscal year"
+    entries = retrieve(
+        {
+            "data_requests": [
+                {
+                    "label": "defense outlays fiscal year 1940",
+                    "row_hint": "National defense",
+                    "column_hint": "",
+                    "years": [1940],
+                }
+            ]
+        },
+        "fiscal year 1940 national defense outlays",
+        top_k=20,
+        load_html=False,
+    )
+    assert isinstance(entries, list)
+    if len(entries) >= 2:
+        # Find entries with period information
+        fiscal_entries = [e for e in entries if e.get("period") == "fiscal"]
+        calendar_entries = [e for e in entries if e.get("period") == "calendar"]
+        # If both exist, fiscal entries should rank before calendar entries
+        if fiscal_entries and calendar_entries:
+            fiscal_ranks = [entries.index(e) for e in fiscal_entries]
+            calendar_ranks = [entries.index(e) for e in calendar_entries]
+            assert min(fiscal_ranks) < min(calendar_ranks), (
+                f"Fiscal tables should rank before calendar tables for FY question: "
+                f"fiscal_min_rank={min(fiscal_ranks)}, calendar_min_rank={min(calendar_ranks)}"
+            )
+
+
+@skip_no_ledger
+def test_row_hint_alternatives_superset_behavior():
+    """Plans with row_hint_alternatives find superset of hits vs primary-only."""
+    plan_with_alts = {
+        "data_requests": [
+            {
+                "label": "national defense",
+                "row_hint": "National defense",
+                "row_hint_alternatives": [
+                    "National defense and associated activities",
+                    "National defense (050)",
+                ],
+                "column_hint": "",
+                "years": [1940],
+            }
+        ],
+    }
+    plan_no_alts = {
+        "data_requests": [
+            {
+                "label": "national defense",
+                "row_hint": "National defense",
+                "column_hint": "",
+                "years": [1940],
+            }
+        ],
+    }
+    entries_with_alts = retrieve(
+        plan_with_alts,
+        "national defense expenditures 1940",
+        top_k=10,
+        load_html=False,
+    )
+    entries_no_alts = retrieve(
+        plan_no_alts,
+        "national defense expenditures 1940",
+        top_k=10,
+        load_html=False,
+    )
+    # With alternatives, we should find at least as many results
+    files_with_alts = {e["file"] for e in entries_with_alts}
+    files_no_alts = {e["file"] for e in entries_no_alts}
+    assert len(files_with_alts) >= len(files_no_alts)

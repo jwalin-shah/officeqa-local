@@ -472,7 +472,33 @@ def _file_year_bonus(file_year, file_month, target_years, year_mode) -> float:
     return base + month_bonus
 
 
-# ── Ledger connection + lazy HTML loader ────────────────────────────────────
+def _period_aware_score_delta(year_mode: str, table_period: str | None) -> float:
+    """Score delta for period-aware reranking.
+
+    When the question targets calendar/fiscal year, tables whose period
+    column matches get a boost (>=0.5) and mismatched tables get a
+    penalty (<=-0.3). Unknown mode or empty/None period → 0.0.
+    """
+    if year_mode not in ("calendar", "fiscal"):
+        return 0.0
+    if not table_period:
+        return 0.0
+    tp = table_period.lower().strip()
+    if not tp:
+        return 0.0
+    # Map table period values to standard forms
+    # Common period values in ledger: "fiscal", "calendar", "monthly", "annual", etc.
+    if "fiscal" in tp or tp.startswith("fy"):
+        normalized = "fiscal"
+    elif "calendar" in tp or tp.startswith("cy"):
+        normalized = "calendar"
+    else:
+        # Unknown period type — neither boost nor penalty
+        return 0.0
+    if year_mode == normalized:
+        return 0.5
+    else:
+        return -0.3
 
 
 _LEDGER_TLS = threading.local()
@@ -523,19 +549,41 @@ def _fts_escape(tokens: list[str], mode: str = "or") -> str:
 # ── Hint extraction from decompose plans ────────────────────────────────────
 
 
-def _extract_hints(plan: dict | None, question: str):
+def _extract_hints(plan: dict | None, question: str) -> list[dict]:
+    """Extract retrieval hints from ALL data_requests in a plan.
+
+    Returns a list of dicts (one per data_request), each with keys:
+      metric, col_hint, row_hint, row_hint_alternatives, years
+    If plan is None or has no data_requests, returns [].
+    """
     reqs = (plan or {}).get("data_requests") or []
-    first = reqs[0] if reqs else {}
-    metric = (first.get("label") or (plan or {}).get("metric") or "").strip()
-    col_hint = (first.get("column_hint") or "").strip()
-    row_hint = (first.get("row_hint") or "").strip()
-    tys: list[int] = []
-    for y in first.get("years") or []:
-        with suppress(TypeError, ValueError):
-            tys.append(int(y))
-    if not tys:
-        tys = parse_years_from_question(question)
-    return metric, col_hint, row_hint, tys
+    if not reqs:
+        return []
+    question_years = parse_years_from_question(question)
+    hints: list[dict] = []
+    for req in reqs:
+        metric = (req.get("label") or (plan or {}).get("metric") or "").strip()
+        col_hint = (req.get("column_hint") or "").strip()
+        row_hint = (req.get("row_hint") or "").strip()
+        row_hint_alts = req.get("row_hint_alternatives") or []
+        if isinstance(row_hint_alts, str):
+            row_hint_alts = [row_hint_alts]
+        tys: list[int] = []
+        for y in req.get("years") or []:
+            with suppress(TypeError, ValueError):
+                tys.append(int(y))
+        if not tys:
+            tys = question_years
+        hints.append(
+            {
+                "metric": metric,
+                "col_hint": col_hint,
+                "row_hint": row_hint,
+                "row_hint_alternatives": list(row_hint_alts),
+                "years": tys,
+            }
+        )
+    return hints
 
 
 # ── FTS channel ─────────────────────────────────────────────────────────────
@@ -1045,19 +1093,40 @@ def retrieve(
     dedupe_by_file: bool = True,
     load_html: bool = True,
 ) -> list[dict]:
-    """Two-channel ledger retrieval — FTS ∪ metric — reranked and returned
-    as shape-compatible dicts for extract.py.
+    """Multi-request, multi-channel ledger retrieval — FTS ∪ metric — reranked
+    and returned as shape-compatible dicts for extract.py.
+
+    Processes ALL data_requests in the plan, running the metric channel for
+    each request's row_hint + row_hint_alternatives. Period-aware scoring
+    boosts tables whose period matches the question's year mode and penalizes
+    mismatches.
     """
     conn = _ledger_conn()
 
-    metric, col_hint, row_hint, target_years = _extract_hints(plan, question)
+    hints = _extract_hints(plan, question)
     year_mode = detect_year_mode(question)
     wants_monthly = _detect_wants_monthly(question)
 
     direct_refs = parse_direct_bulletin_refs(question)
     direct_files = {f"treasury_bulletin_{yr}_{mo:02d}.json" for yr, mo in direct_refs}
 
-    query_text = f"{question} {metric} {row_hint} {col_hint}".strip()
+    # Aggregate query tokens and target years across ALL data_requests
+    all_metrics: list[str] = []
+    all_row_hints: list[str] = []
+    all_col_hints: list[str] = []
+    all_target_years: set[int] = set()
+    for h in hints:
+        if h["metric"]:
+            all_metrics.append(h["metric"])
+        if h["row_hint"]:
+            all_row_hints.append(h["row_hint"])
+        if h["col_hint"]:
+            all_col_hints.append(h["col_hint"])
+        all_target_years.update(h["years"])
+
+    target_years = sorted(all_target_years)
+
+    query_text = f"{question} {' '.join(all_metrics)} {' '.join(all_row_hints)} {' '.join(all_col_hints)}".strip()
     q_tokens = content_tokens(query_text)
 
     fts_trace = _fts_channel_trace(
@@ -1067,14 +1136,68 @@ def retrieve(
         wants_monthly,
         source_text=query_text,
     )
-    metric_trace = _metric_channel_trace(
-        conn,
-        metric,
-        row_hint,
-        col_hint,
-        target_years,
-        wants_monthly,
-    )
+
+    # Run metric channel for EACH data_request, including alternatives
+    all_metric_rows: list[sqlite3.Row] = []
+    all_metric_strategy_by_id: dict[int, str] = {}
+    all_metric_attempts: list[tuple[str, int]] = []
+    seen_metric_ids: set[int] = set()
+
+    for h in hints:
+        metric = h["metric"]
+        row_hint = h["row_hint"]
+        col_hint = h["col_hint"]
+        dr_years = h["years"]
+
+        # Primary metric channel call with the main row_hint
+        trace = _metric_channel_trace(
+            conn,
+            metric,
+            row_hint,
+            col_hint,
+            dr_years,
+            wants_monthly,
+        )
+        for r in trace.rows:
+            rid = int(r["id"])
+            if rid not in seen_metric_ids:
+                seen_metric_ids.add(rid)
+                all_metric_rows.append(r)
+                if rid in trace.strategy_by_id:
+                    all_metric_strategy_by_id[rid] = trace.strategy_by_id[rid]
+        all_metric_attempts.extend(trace.attempts)
+
+        # Also run metric channel for each row_hint_alternative
+        for alt in h["row_hint_alternatives"]:
+            alt_trace = _metric_channel_trace(
+                conn,
+                metric,
+                alt,
+                col_hint,
+                dr_years,
+                wants_monthly,
+            )
+            for r in alt_trace.rows:
+                rid = int(r["id"])
+                if rid not in seen_metric_ids:
+                    seen_metric_ids.add(rid)
+                    all_metric_rows.append(r)
+                    # Use "alt:<alternative>" strategy label
+                    if rid in alt_trace.strategy_by_id:
+                        all_metric_strategy_by_id[rid] = f"alt:{alt_trace.strategy_by_id[rid]}"
+            all_metric_attempts.extend(alt_trace.attempts)
+
+    # Build a synthetic metric_trace-like structure for downstream
+    class _MergedTrace:
+        rows: list[sqlite3.Row]
+        strategy_by_id: dict[int, str]
+        attempts: list[tuple[str, int]]
+
+    metric_trace = _MergedTrace()
+    metric_trace.rows = all_metric_rows
+    metric_trace.strategy_by_id = all_metric_strategy_by_id
+    metric_trace.attempts = all_metric_attempts
+
     pf_hits = _prose_footnote_channel(conn, q_tokens, target_years)
     fts_rows = fts_trace.rows
     metric_rows = metric_trace.rows
@@ -1121,6 +1244,11 @@ def retrieve(
             target_years,
             year_mode,
         )
+        # Period-aware scoring: boost matching period, penalize mismatched.
+        # Scaled by 0.2 to prevent the period signal from dominating — many
+        # tables contain both FY and CY data despite being labeled with one
+        # period, so the raw delta would incorrectly demote correct tables.
+        s += 0.2 * _period_aware_score_delta(year_mode, row["period"])
         if direct_files and row["file"] in direct_files:
             s += 5.0
         reranked.append((s, row))
