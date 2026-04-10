@@ -6,19 +6,19 @@
 
 ## Pipeline Flow
 ```
-Question → scout() → decompose() → retrieve_for_spec() → extract_structured() → execute() → verify_answer() → Answer
-                                         ↑                        ↑
-                                    [bounce-back on empty]  [bounce-back on verify fail]
+Question → scout() → decompose() → retrieve_for_spec() → [_try_deterministic_fast_path] → extract_structured() → execute() → verify_answer() → Answer
+                                         ↑                        ↑                              ↑
+                                    [bounce-back on empty]  [bounce-back on verify fail]  [fast-path: skip LLM if all DRs resolve]
 ```
 
 ## Component Responsibilities
-- **solve.py** — orchestrator. Manages bounce-back loops (empty retrieve → re-decompose, verify fail → re-extract or re-decompose). Parallel eval via ThreadPoolExecutor.
+- **solve.py** — orchestrator. Manages bounce-back loops (empty retrieve → re-decompose, verify fail → re-extract or re-decompose). Parallel eval via ThreadPoolExecutor. **Deterministic fast-path**: before LLM extraction, attempts resolve_cells() for each data_request. If ALL DRs resolve, skips LLM entirely; if ANY fails, falls back to normal LLM extraction.
 - **scout.py** — deterministic. Calls retrieve_from_question() top-5 to ground decompose with real corpus labels.
 - **retrieve_v2.py** — deterministic. Two-channel funnel: FTS (broad) + metric substring (precise). Union + rerank. No LLM.
 - **extract.py** — LLM. Per-data-request context assembly. Renders HTML tables to pipe-delimited text. Returns structured JSON extractions.
 - **compute.py** — deterministic. Executes python_template from QuestionSpec. Safe sandbox with restricted builtins.
 - **verify.py** — LLM. Post-compute verification checklist. Returns {ok, issue, suggested_phase}.
-- **find.py** — deterministic. resolve_cells() for direct cell lookup by row/col labels. Not wired into main pipeline yet.
+- **find.py** — deterministic. resolve_cells() for direct cell lookup by row/col labels. **Wired into solve.py as deterministic fast-path** before LLM extraction.
 
 ## Ledger Schema (ledger.sqlite)
 - `tables` — one row per source table (94K tables)
@@ -34,9 +34,32 @@ Question → scout() → decompose() → retrieve_for_spec() → extract_structu
 DB size: ~2.2GB (reduced from 7.8GB after metrics VIEW migration + is_missing cell deletion)
 
 ## Arena Reference Architecture
-The arena's best systems used: deterministic ingestion → structured extraction via sub-agents → deterministic computation. Our pipeline follows this pattern. Key arena techniques to port:
-- Vertical serialization (extract)
-- Synonym expansion + multi-strategy search (retrieve)
-- Deterministic fast-path cell resolution (extract)
-- Mentor/review verification pattern (verify)
-- Pre-extracted monthly values (extract)
+The arena's best systems used: deterministic ingestion → structured extraction via sub-agents → deterministic computation. Our pipeline follows this pattern. Key arena techniques ported:
+- ✅ Vertical serialization (extract)
+- ✅ Synonym expansion + multi-strategy search (retrieve)
+- ✅ Deterministic fast-path cell resolution (extract → solve.py)
+- Mentor/review verification pattern (verify) — pending
+- Pre-extracted monthly values (extract) — pending
+
+## Deterministic Fast-Path Details
+The fast-path in `_run_extract_and_compute()` attempts to resolve all data_requests using `resolve_cells()` from find.py before falling back to LLM extraction.
+
+**Flow:**
+1. For each DR, check if source is corpus (skip external/cpi/fx)
+2. Get the best retrieved table entry → look up table_id from ledger
+3. Build cell specs based on granularity (annual: 1 cell, monthly_all: 12 cells, multi_year_annual: N cells)
+4. Call `resolve_cells(table_id, cells)` — does exact row_leaf/col_leaf matching
+5. If ALL DRs resolve with non-None values → return extractions dict, skip LLM
+6. If ANY DR has unresolved values → return None, fall back to LLM
+
+**Key helpers in solve.py:**
+- `_fp_conn()` — thread-local ledger connection for fast-path queries
+- `_get_table_id_from_entry(entry)` — maps retrieve_v2 entry to ledger table ID
+- `_build_cells_for_dr(dr, table_id)` — builds cell specs for resolve_cells()
+- `_try_deterministic_fast_path(spec, per_dr_entries, verbose)` — main entry point
+
+**Limitations:**
+- Requires exact row_leaf/col_leaf match — fuzzy matches fall through to LLM
+- External/CPI/FX source DRs automatically fail (can't resolve from ledger)
+- Prose/footnote entries are skipped (no table to resolve from)
+- Currently the fast-path is all-or-nothing: if any DR fails, all DRs go to LLM

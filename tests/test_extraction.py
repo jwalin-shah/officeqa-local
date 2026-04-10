@@ -1,4 +1,6 @@
-"""Tests for extract.py — html_to_pipe_text(), html_to_vertical_text(), rendering helpers, mocked extract_structured()."""
+"""Tests for extract.py — html_to_pipe_text(), html_to_vertical_text(), rendering helpers, mocked extract_structured().
+
+Also tests for the deterministic fast-path in solve.py (_try_deterministic_fast_path)."""
 
 from unittest.mock import MagicMock, patch
 
@@ -403,3 +405,574 @@ def test_vertical_non_month_columns_no_month_annotation():
     assert "(month" not in result
     # Still has column header: value
     assert "Year 1935:" in result
+
+
+# ── Deterministic fast-path (_try_deterministic_fast_path in solve.py) ──────
+
+
+def _make_annual_spec() -> dict:
+    """Build a minimal spec with one annual data_request."""
+    return {
+        "computation": "direct",
+        "data_requests": [
+            {
+                "id": "v1",
+                "label": "National defense expenditures 1940",
+                "source": "corpus",
+                "row_hint": "National defense",
+                "column_hint": "1940",
+                "years": [1940],
+                "granularity": "annual",
+                "expected_count": 1,
+                "cohort": False,
+            }
+        ],
+        "computation_spec": {"python_template": "result = values['v1'][0]"},
+        "output_format": {
+            "type": "number",
+            "unit": "millions",
+            "rounding": None,
+            "as_percent": False,
+        },
+    }
+
+
+def _make_monthly_spec() -> dict:
+    """Build a minimal spec with one monthly_all data_request."""
+    return {
+        "computation": "sum",
+        "data_requests": [
+            {
+                "id": "v1",
+                "label": "Monthly national defense expenditures CY 1940",
+                "source": "corpus",
+                "row_hint": "National defense",
+                "column_hint": "",
+                "years": [1940],
+                "granularity": "monthly_all",
+                "expected_count": 12,
+                "cohort": False,
+            }
+        ],
+        "computation_spec": {"python_template": "result = sum(values['v1'])"},
+        "output_format": {
+            "type": "number",
+            "unit": "millions",
+            "rounding": None,
+            "as_percent": False,
+        },
+    }
+
+
+def _make_multi_dr_spec() -> dict:
+    """Build a spec with two annual data_requests."""
+    return {
+        "computation": "percent_change",
+        "data_requests": [
+            {
+                "id": "v1",
+                "label": "Defense expenditures 1938",
+                "source": "corpus",
+                "row_hint": "National defense",
+                "column_hint": "1938",
+                "years": [1938],
+                "granularity": "annual",
+                "expected_count": 1,
+                "cohort": False,
+            },
+            {
+                "id": "v2",
+                "label": "Defense expenditures 1940",
+                "source": "corpus",
+                "row_hint": "National defense",
+                "column_hint": "1940",
+                "years": [1940],
+                "granularity": "annual",
+                "expected_count": 1,
+                "cohort": False,
+            },
+        ],
+        "computation_spec": {
+            "python_template": "result = (values['v2'][0] - values['v1'][0]) / values['v1'][0] * 100"
+        },
+        "output_format": {
+            "type": "number",
+            "unit": "percent",
+            "rounding": "hundredths",
+            "as_percent": False,
+        },
+    }
+
+
+def _make_table_entry(table_id: int = 42) -> dict:
+    """Build a mock retrieve_v2 entry with a known file/element_seq."""
+    return {
+        "file": "treasury_bulletin_1941_01.json",
+        "element_id": 5,
+        "element_seq": 7,
+        "page_id": 12,
+        "file_year": 1941,
+        "file_month": 1,
+        "section": "Table 3",
+        "title": "Budget Receipts and Outlays",
+        "caption": "",
+        "column_headers": ["Fiscal year", "Total", "National defense"],
+        "row_labels": ["1938", "1939", "1940"],
+        "years": [1938, 1939, 1940],
+        "unit": "millions_usd",
+        "period": "fiscal",
+        "n_rows": 5,
+        "n_cols": 3,
+        "retrieval_strategy": "exact",
+        "retrieval_channel": "metric",
+        "html": "<table><tr><th>Year</th><th>Total</th><th>National defense</th></tr>"
+        "<tr><td>1940</td><td>9468</td><td>1580</td></tr></table>",
+    }
+
+
+def test_fast_path_all_resolve_annual():
+    """When all data_requests resolve deterministically, fast-path returns
+    extractions dict without calling the LLM."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    # Mock: _get_table_id_from_entry returns 42, _build_cells_for_dr builds one cell,
+    # resolve_cells returns a resolved value
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch(
+            "solve._build_cells_for_dr",
+            return_value=[{"row_leaf": "National defense", "col_leaf": "1940", "name": "v1"}],
+        ),
+        patch("solve.resolve_cells") as mock_resolve,
+    ):
+        mock_resolve.return_value = {
+            "values": {"v1": 1580.0},
+            "debug": {"v1": {"status": "ok", "raw": "1580", "num": 1580.0}},
+        }
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    assert result is not None
+    assert "extractions" in result
+    assert result["extractions"]["v1"]["values"] == [1580.0]
+    assert result["extractions"]["v1"]["confidence"] == "deterministic"
+    # LLM was NOT called — resolve_cells was the only function invoked
+    mock_resolve.assert_called_once()
+
+
+def test_fast_path_partial_resolve_falls_back():
+    """When resolve_cells returns None for any value, fast-path returns None
+    and the caller should fall back to LLM extraction."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch(
+            "solve._build_cells_for_dr",
+            return_value=[{"row_leaf": "National defense", "col_leaf": "1940", "name": "v1"}],
+        ),
+        patch("solve.resolve_cells") as mock_resolve,
+    ):
+        mock_resolve.return_value = {
+            "values": {"v1": None},
+            "debug": {"v1": {"status": "label_miss", "row_found": True, "col_found": False}},
+        }
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    # Fast-path should fail (None), falling back to LLM
+    assert result is None
+
+
+def test_fast_path_external_source_graceful():
+    """When a data_request has source='external', fast-path skips it
+    and returns None (not a crash)."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    # Override the source to 'external'
+    spec["data_requests"][0]["source"] = "external"
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+    # Should return None gracefully, not raise
+    assert result is None
+
+
+def test_fast_path_cpi_source_skipped():
+    """When a data_request has source='cpi', fast-path skips it."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    spec["data_requests"][0]["source"] = "cpi"
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+    assert result is None
+
+
+def test_fast_path_no_retrieved_entries():
+    """When per_dr_entries has no entries for a DR, fast-path returns None."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    per_dr = {"v1": []}  # empty entries
+
+    result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+    assert result is None
+
+
+def test_fast_path_no_table_entries_only_pf():
+    """When only prose/footnote entries exist (no table entries), fast-path returns None."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    # Prose/footnote entries have 'content' but no 'html' with data
+    pf_entry = {
+        "file": "test.json",
+        "element_id": None,
+        "element_seq": 99,
+        "page_id": 1,
+        "section": "",
+        "title": "",
+        "caption": "",
+        "content": "Some footnote text",
+        "retrieval_channel": "prose_footnote",
+        "html": "",
+    }
+    per_dr = {"v1": [pf_entry]}
+
+    result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+    assert result is None
+
+
+def test_fast_path_table_id_not_found():
+    """When the table_id can't be resolved from the entry, fast-path returns None."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    with patch("solve._get_table_id_from_entry", return_value=None):
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    assert result is None
+
+
+def test_fast_path_cant_build_cells():
+    """When _build_cells_for_dr returns None (unsupported granularity), fast-path returns None."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("solve._build_cells_for_dr", return_value=None),
+    ):
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    assert result is None
+
+
+def test_fast_path_multi_dr_all_resolve():
+    """When multiple data_requests all resolve, fast-path returns extractions
+    for all DRs."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_multi_dr_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries, "v2": entries}
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("solve._build_cells_for_dr") as mock_build,
+        patch("solve.resolve_cells") as mock_resolve,
+    ):
+        # First call for v1, second for v2
+        mock_build.side_effect = [
+            [{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
+            [{"row_leaf": "National defense", "col_leaf": "1940", "name": "v2"}],
+        ]
+        mock_resolve.side_effect = [
+            {"values": {"v1": 1200.0}, "debug": {}},
+            {"values": {"v2": 1580.0}, "debug": {}},
+        ]
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    assert result is not None
+    assert result["extractions"]["v1"]["values"] == [1200.0]
+    assert result["extractions"]["v2"]["values"] == [1580.0]
+
+
+def test_fast_path_multi_dr_partial_fails():
+    """When one of two data_requests fails to resolve, fast-path returns None
+    (falls back to full LLM extraction for all DRs)."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_multi_dr_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries, "v2": entries}
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("solve._build_cells_for_dr") as mock_build,
+        patch("solve.resolve_cells") as mock_resolve,
+    ):
+        mock_build.side_effect = [
+            [{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
+            [{"row_leaf": "National defense", "col_leaf": "1940", "name": "v2"}],
+        ]
+        # v1 resolves, v2 doesn't
+        mock_resolve.side_effect = [
+            {"values": {"v1": 1200.0}, "debug": {}},
+            {"values": {"v2": None}, "debug": {"v2": {"status": "label_miss"}}},
+        ]
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    # Fast-path should fail because v2 didn't resolve
+    assert result is None
+
+
+def test_fast_path_monthly_all_resolve():
+    """When monthly_all DR resolves all 12 values, fast-path returns
+    extractions with 12 values in order."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_monthly_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    monthly_cells = [
+        {"row_leaf": "National defense", "col_leaf": f"month_{m}", "name": f"m{m:02d}"}
+        for m in range(1, 13)
+    ]
+    monthly_values = {f"m{m:02d}": float(m * 100) for m in range(1, 13)}
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("solve._build_cells_for_dr", return_value=monthly_cells),
+        patch("solve.resolve_cells") as mock_resolve,
+    ):
+        mock_resolve.return_value = {"values": monthly_values, "debug": {}}
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    assert result is not None
+    assert len(result["extractions"]["v1"]["values"]) == 12
+    assert result["extractions"]["v1"]["values"][0] == 100.0  # Jan
+    assert result["extractions"]["v1"]["values"][11] == 1200.0  # Dec
+
+
+def test_fast_path_monthly_incomplete_fails():
+    """When monthly_all DR resolves fewer than 12 values, fast-path returns None."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_monthly_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    # Only 10 months resolved (e.g., missing Nov/Dec)
+    incomplete_cells = [
+        {"row_leaf": "National defense", "col_leaf": f"month_{m}", "name": f"m{m:02d}"}
+        for m in range(1, 11)  # Only 10 months
+    ]
+    incomplete_values = {f"m{m:02d}": float(m * 100) for m in range(1, 11)}
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("solve._build_cells_for_dr", return_value=incomplete_cells),
+        patch("solve.resolve_cells") as mock_resolve,
+    ):
+        mock_resolve.return_value = {"values": incomplete_values, "debug": {}}
+        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    # Should fail because we don't have 12 values
+    assert result is None
+
+
+def test_fast_path_values_format_matches_llm_extraction():
+    """The extractions dict from fast-path has the same structure as LLM extraction,
+    so compute can process it identically."""
+    from compute import execute as compute_execute
+
+    spec = _make_annual_spec()
+    # Simulate what fast-path would return
+    fast_path_extractions = {
+        "v1": {
+            "values": [1580.0],
+            "labels": ["National defense"],
+            "source_file": "treasury_bulletin_1941_01.json",
+            "confidence": "deterministic",
+        }
+    }
+    # Compute should work with this format just like LLM extraction
+    result = compute_execute(spec, fast_path_extractions, verbose=False)
+    assert result == 1580.0
+
+
+def test_fast_path_monthly_values_format_matches_compute():
+    """Monthly values from fast-path work correctly with compute's sum template."""
+    from compute import execute as compute_execute
+
+    spec = _make_monthly_spec()
+    monthly_vals = [
+        100.0,
+        110.0,
+        120.0,
+        130.0,
+        140.0,
+        150.0,
+        160.0,
+        170.0,
+        180.0,
+        190.0,
+        200.0,
+        210.0,
+    ]
+    fast_path_extractions = {
+        "v1": {
+            "values": monthly_vals,
+            "labels": [f"month {m}" for m in range(1, 13)],
+            "source_file": "test.json",
+            "confidence": "deterministic",
+        }
+    }
+    result = compute_execute(spec, fast_path_extractions, verbose=False)
+    assert result == sum(monthly_vals)
+
+
+def test_fast_path_empty_spec():
+    """Fast-path returns None when spec has no data_requests."""
+    from solve import _try_deterministic_fast_path
+
+    result = _try_deterministic_fast_path({}, {}, verbose=True)
+    assert result is None
+
+
+def test_fast_path_logging_on_success(capsys):
+    """Fast-path logs when all DRs resolve deterministically."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch(
+            "solve._build_cells_for_dr",
+            return_value=[{"row_leaf": "National defense", "col_leaf": "1940", "name": "v1"}],
+        ),
+        patch("solve.resolve_cells", return_value={"values": {"v1": 1580.0}, "debug": {}}),
+    ):
+        _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    captured = capsys.readouterr()
+    assert "Fast-path" in captured.out or "deterministic" in captured.out.lower()
+
+
+def test_fast_path_logging_on_failure(capsys):
+    """Fast-path logs when it falls back (unresolved cells)."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch(
+            "solve._build_cells_for_dr",
+            return_value=[{"row_leaf": "National defense", "col_leaf": "1940", "name": "v1"}],
+        ),
+        patch(
+            "solve.resolve_cells",
+            return_value={"values": {"v1": None}, "debug": {"v1": {"status": "label_miss"}}},
+        ),
+    ):
+        _try_deterministic_fast_path(spec, per_dr, verbose=True)
+
+    captured = capsys.readouterr()
+    assert "Fast-path" in captured.out or "fast-path" in captured.out.lower()
+
+
+def test_fast_path_with_run_extract_and_compute():
+    """_run_extract_and_compute tries the fast-path first, and skips LLM
+    when all values resolve deterministically."""
+    from solve import _run_extract_and_compute
+
+    spec = _make_annual_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    with (
+        patch("solve._try_deterministic_fast_path") as mock_fp,
+        patch("solve.extract_structured") as mock_llm,
+        patch("solve.compute_execute", return_value=1580.0) as mock_compute,
+        patch("solve.format_result", return_value="1580"),
+    ):
+        mock_fp.return_value = {
+            "extractions": {
+                "v1": {
+                    "values": [1580.0],
+                    "labels": ["National defense"],
+                    "source_file": "test.json",
+                    "confidence": "deterministic",
+                }
+            },
+            "notes": "v1: resolved deterministically",
+        }
+        answer, extraction = _run_extract_and_compute(spec, per_dr, "test question", verbose=True)
+
+    # Fast-path was attempted
+    mock_fp.assert_called_once()
+    # LLM extract was NOT called
+    mock_llm.assert_not_called()
+    # Compute was called with the fast-path extractions
+    mock_compute.assert_called_once()
+    assert answer == "1580"
+
+
+def test_fast_path_fallback_to_llm():
+    """_run_extract_and_compute falls back to LLM when fast-path returns None."""
+    from solve import _run_extract_and_compute
+
+    spec = _make_annual_spec()
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    with (
+        patch("solve._try_deterministic_fast_path", return_value=None) as mock_fp,
+        patch("solve.extract_structured") as mock_llm,
+        patch("solve.validate_extractions", return_value=[]),
+        patch("solve.compute_execute", return_value=1580.0),
+        patch("solve.format_result", return_value="1580"),
+    ):
+        mock_llm.return_value = {
+            "extractions": {
+                "v1": {
+                    "values": [1580.0],
+                    "labels": ["National defense"],
+                    "source_file": "test.json",
+                    "confidence": "high",
+                }
+            },
+            "notes": "LLM extraction",
+        }
+        answer, extraction = _run_extract_and_compute(spec, per_dr, "test question", verbose=True)
+
+    # Fast-path was attempted
+    mock_fp.assert_called_once()
+    # LLM extract WAS called (fallback)
+    mock_llm.assert_called_once()
+    assert answer == "1580"
