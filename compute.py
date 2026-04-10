@@ -174,7 +174,7 @@ def execute(spec: dict, extractions: dict, verbose: bool = False):
     # CPI injection if needed
     if spec.get("cpi_needed"):
         try:
-            from cpi import annual_cpi  # optional helper
+            from cpi import annual_cpi  # type: ignore[import-unresolved]  # optional helper
 
             base = spec.get("cpi_base_year")
             target = spec.get("cpi_target_year")
@@ -235,7 +235,6 @@ def format_result(result, output_format: dict, source_unit: str | None = None) -
         return "None"
 
     fmt = output_format or {}
-    rtype = fmt.get("type", "number")
     rounding = fmt.get("rounding")
     target_unit = fmt.get("unit")
 
@@ -249,14 +248,14 @@ def format_result(result, output_format: dict, source_unit: str | None = None) -
         "thousandths": 3,
         "ten_thousandths": 4,
     }
-    digits = round_map.get(rounding)
+    digits = round_map.get(rounding) if isinstance(rounding, str) else None
 
     def _fmt_num(x):
         if digits is not None:
             x = round(float(x), digits)
         return str(x)
 
-    if rtype == "list" or isinstance(result, (list, tuple)):
+    if isinstance(result, (list, tuple)):
         items = [_fmt_num(x) if isinstance(x, (int, float)) else str(x) for x in result]
         return "[" + ", ".join(items) + "]"
 

@@ -26,7 +26,7 @@ from retrieve_v2 import retrieve as retrieve_v2
 from scout import scout
 from verify import verify_answer
 
-sys.stdout.reconfigure(line_buffering=True)
+sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
 load_dotenv()
 
 MODEL = os.getenv("OFFICEQA_MODEL", "deepseek/deepseek-chat")

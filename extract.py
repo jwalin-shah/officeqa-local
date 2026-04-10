@@ -638,8 +638,9 @@ def score_section(section: TableSection, query_terms: list[str], years: list[int
     num_count = 0
     for line in section.data_lines[:10]:
         for cell in split_row(line)[1:]:
-            if to_num(cell) is not None:
-                n = abs(to_num(cell))
+            val = to_num(cell)
+            if val is not None:
+                n = abs(val)
                 if n >= 10:
                     num_count += 1
     if num_count >= 5:
