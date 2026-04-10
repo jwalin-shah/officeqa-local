@@ -1244,10 +1244,12 @@ def retrieve(
             target_years,
             year_mode,
         )
-        # Period-aware scoring: boost matching period, penalize mismatched.
-        # Full delta applied (+0.5 match, -0.3 mismatch) for meaningful
-        # period discrimination. Unknown mode or empty period → 0.0.
-        s += _period_aware_score_delta(year_mode, row["period"])
+        # Period-aware scoring: scaled by 0.2 so period acts as a gentle
+        # tiebreaker rather than dominating FTS+metric relevance scores.
+        # Raw delta has 0.8 range (+0.5/-0.3) which nearly matches the
+        # entire FTS+metric range (0-1.0); the 0.2 scaling keeps it as a
+        # tiebreaker (+0.10/-0.06). Unknown mode or empty period → 0.0.
+        s += 0.2 * _period_aware_score_delta(year_mode, row["period"])
         if direct_files and row["file"] in direct_files:
             s += 5.0
         reranked.append((s, row))
@@ -1391,7 +1393,10 @@ def retrieve(
             )
             pf_added += 1
 
-    return entries[:top_k]
+    # PF entries are intentionally supplementary (up to PF_MAX_SLOTS extra)
+    # beyond the table top_k limit. The table loop already enforces
+    # `if len(entries) >= top_k: break`, so slicing would remove PF entries.
+    return entries
 
 
 def retrieve_from_question(question: str, top_k: int = 10) -> list[dict]:
