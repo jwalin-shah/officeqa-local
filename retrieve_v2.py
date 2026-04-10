@@ -24,7 +24,9 @@ import sqlite3
 import sys
 import threading
 import time
+from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 _reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
@@ -333,6 +335,52 @@ def _merge_ranked_rows(*groups: list[sqlite3.Row], top_n: int) -> list[sqlite3.R
     return merged
 
 
+@dataclass
+class ChannelTrace:
+    rows: list[sqlite3.Row]
+    strategy_by_id: dict[int, str]
+    attempts: list[tuple[str, int]]
+
+
+def _append_unique_rows(
+    merged: list[sqlite3.Row],
+    seen_ids: set[int],
+    strategy_by_id: dict[int, str],
+    rows: list[sqlite3.Row],
+    strategy: str,
+    top_n: int,
+) -> None:
+    for row in rows:
+        row_id = int(row["id"])
+        if row_id in seen_ids:
+            continue
+        seen_ids.add(row_id)
+        strategy_by_id[row_id] = strategy
+        merged.append(row)
+        if len(merged) >= top_n:
+            return
+
+
+def _collect_progressive_rows(
+    stages: list[tuple[str, Callable[[], list[sqlite3.Row]]]],
+    threshold: int,
+    top_n: int,
+) -> ChannelTrace:
+    merged: list[sqlite3.Row] = []
+    seen_ids: set[int] = set()
+    strategy_by_id: dict[int, str] = {}
+    attempts: list[tuple[str, int]] = []
+
+    for strategy, runner in stages:
+        rows = runner()
+        attempts.append((strategy, len(rows)))
+        _append_unique_rows(merged, seen_ids, strategy_by_id, rows, strategy, top_n)
+        if len(merged) >= top_n or len(rows) >= threshold:
+            break
+
+    return ChannelTrace(rows=merged, strategy_by_id=strategy_by_id, attempts=attempts)
+
+
 # ── Question parsing helpers ────────────────────────────────────────────────
 
 
@@ -501,25 +549,34 @@ def _fts_channel(
     top_n: int = 400,
     source_text: str = "",
 ) -> list[sqlite3.Row]:
-    """Run the FTS5 channel against tables_fts, with year filtering and
-    graceful fallback when the filter wipes the candidate pool."""
+    return _fts_channel_trace(
+        conn,
+        q_tokens,
+        target_years,
+        wants_monthly,
+        top_n=top_n,
+        source_text=source_text,
+    ).rows
+
+
+def _fts_channel_trace(
+    conn: sqlite3.Connection,
+    q_tokens: list[str],
+    target_years: list[int],
+    wants_monthly: bool,
+    top_n: int = 400,
+    source_text: str = "",
+) -> ChannelTrace:
+    """Run the FTS5 channel with progressive broadening and trace metadata."""
     if not q_tokens:
-        return []
+        return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
 
-    year_clause = ""
-    year_params: tuple = ()
-    if target_years:
-        lo = min(target_years)
-        hi = max(target_years) + 4
-        year_clause = "AND t.file_year BETWEEN ? AND ?"
-        year_params = (lo, hi)
-
-    year_filter_clause = ""
-    year_filter_params: tuple = ()
-    if target_years:
+    def _build_year_filter_clause() -> tuple[str, tuple]:
+        if not target_years:
+            return "", ()
         ty_placeholders = ",".join("?" * len(target_years))
         month_restrict = "AND month_extracted IS NOT NULL" if wants_monthly else ""
-        year_filter_clause = (
+        clause = (
             " AND t.id IN ("  # nosec B608
             f" SELECT table_id FROM table_columns"
             f" WHERE year_extracted IN ({ty_placeholders}) {month_restrict}"
@@ -528,15 +585,28 @@ def _fts_channel(
             f" WHERE year_extracted IN ({ty_placeholders}) {month_restrict}"
             " )"
         )
-        year_filter_params = (*target_years, *target_years)
+        return clause, (*target_years, *target_years)
 
-    def _run(fts_query: str, with_year_filter: bool, with_year_window: bool):
+    year_filter_clause, year_filter_params = _build_year_filter_clause()
+
+    def _run(
+        fts_query: str,
+        strategy: str,
+        *,
+        with_year_filter: bool = False,
+        file_year_range: tuple[int, int] | None = None,
+    ) -> tuple[str, list[sqlite3.Row]]:
+        file_year_clause = ""
+        file_year_params: tuple[int, int] | None = None
+        if file_year_range is not None:
+            file_year_clause = "AND t.file_year BETWEEN ? AND ?"
+            file_year_params = file_year_range
+
         wf_clause = year_filter_clause if with_year_filter else ""
-        yw_clause = year_clause if with_year_window else ""
-        params = [fts_query]
-        if with_year_window:
-            params.extend(year_params)
-        if with_year_filter:
+        params: list[object] = [fts_query]
+        if file_year_params is not None:
+            params.extend(file_year_params)
+        if with_year_filter and year_filter_clause:
             params.extend(year_filter_params)
         sql = (
             " SELECT"  # nosec B608
@@ -548,35 +618,90 @@ def _fts_channel(
             " FROM tables_fts"
             " JOIN tables t ON t.id = tables_fts.rowid"
             " WHERE tables_fts MATCH ?"
-            f" {yw_clause}"
+            f" {file_year_clause}"
             f" {wf_clause}"
             " AND t.table_kind = 'data'"
             " ORDER BY score"
             f" LIMIT {top_n}"
         )
-        return list(conn.execute(sql, params))
-
-    def _run_progressive(tokens: list[str]) -> list[sqlite3.Row]:
-        fts_q = _fts_escape(tokens, mode="or")
-        if not fts_q:
-            return []
-        rows = _run(fts_q, with_year_filter=True, with_year_window=True)
-        if not rows and year_filter_clause:
-            rows = _run(fts_q, with_year_filter=False, with_year_window=True)
-        if not rows and year_clause:
-            rows = _run(fts_q, with_year_filter=False, with_year_window=False)
-        return rows
-
-    rows = _run_progressive(q_tokens)
-    if len(rows) >= FTS_SYNONYM_THRESHOLD:
-        return rows
+        return strategy, list(conn.execute(sql, params))
 
     synonym_tokens = _expand_synonyms(q_tokens, source_text)
-    if synonym_tokens == q_tokens:
-        return rows
+    exact_query = _fts_escape(q_tokens, mode="and")
+    synonym_query = _fts_escape(synonym_tokens, mode="or")
 
-    synonym_rows = _run_progressive(synonym_tokens)
-    return _merge_ranked_rows(rows, synonym_rows, top_n=top_n)
+    stages: list[tuple[str, Callable[[], list[sqlite3.Row]]]] = []
+    if target_years and exact_query:
+        file_year_window = (min(target_years), max(target_years) + 4)
+        stages.append(
+            (
+                "exact_year_filter",
+                lambda query=exact_query, window=file_year_window: _run(
+                    query,
+                    "exact_year_filter",
+                    with_year_filter=True,
+                    file_year_range=window,
+                )[1],
+            )
+        )
+        stages.append(
+            (
+                "exact_year_window",
+                lambda query=exact_query, window=file_year_window: _run(
+                    query,
+                    "exact_year_window",
+                    file_year_range=window,
+                )[1],
+            )
+        )
+        if synonym_query and synonym_query != exact_query:
+            stages.append(
+                (
+                    "synonym_year_window",
+                    lambda query=synonym_query, window=file_year_window: _run(
+                        query,
+                        "synonym_year_window",
+                        file_year_range=window,
+                    )[1],
+                )
+            )
+            stages.append(
+                (
+                    "synonym_unrestricted",
+                    lambda query=synonym_query: _run(query, "synonym_unrestricted")[1],
+                )
+            )
+
+        shift_window = (min(target_years) + 5, max(target_years) + 10)
+        shifted_query = synonym_query or exact_query
+        if shifted_query:
+            stages.append(
+                (
+                    "year_shifted",
+                    lambda query=shifted_query, window=shift_window: _run(
+                        query,
+                        "year_shifted",
+                        with_year_filter=True,
+                        file_year_range=window,
+                    )[1],
+                )
+            )
+    elif exact_query:
+        stages.append(
+            (
+                "exact_unrestricted",
+                lambda query=exact_query: _run(query, "exact_unrestricted")[1],
+            )
+        )
+        if synonym_query and synonym_query != exact_query:
+            stages.append(
+                (
+                    "synonym_unrestricted",
+                    lambda query=synonym_query: _run(query, "synonym_unrestricted")[1],
+                )
+            )
+
+    return _collect_progressive_rows(stages, threshold=FTS_SYNONYM_THRESHOLD, top_n=top_n)
 
 
 # ── Metric channel ──────────────────────────────────────────────────────────
@@ -591,6 +716,26 @@ def _metric_channel(
     wants_monthly: bool,
     top_n: int = 400,
 ) -> list[sqlite3.Row]:
+    return _metric_channel_trace(
+        conn,
+        metric,
+        row_hint,
+        col_hint,
+        target_years,
+        wants_monthly,
+        top_n=top_n,
+    ).rows
+
+
+def _metric_channel_trace(
+    conn: sqlite3.Connection,
+    metric: str,
+    row_hint: str,
+    col_hint: str,
+    target_years: list[int],
+    wants_monthly: bool,
+    top_n: int = 400,
+) -> ChannelTrace:
     """Arena-style substring lookup over metrics.metric_slug + col_norm.
 
     Searches for any of the content tokens from metric/row_hint/col_hint as
@@ -614,7 +759,7 @@ def _metric_channel(
             uniq_terms.append(t)
     terms = uniq_terms[:6]
     if not terms:
-        return []
+        return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
 
     # Guard: the metric channel is designed for clean literal row labels
     # like "national defense" or "individual income taxes, net". It is
@@ -622,9 +767,9 @@ def _metric_channel(
     # pattern from validate_decompose.py) and on full-sentence blobs from
     # oracle mode. Skip in all those cases and let FTS carry the query.
     if not row_hint and len(terms) > 3:
-        return []
+        return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
     if row_hint and len(row_hint.split()) > 8:
-        return []
+        return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
     # "all <X> rows", "excluding...", "e.g....", "aggregates" — these are
     # instructions about which rows to pick, not literal row labels.
     descriptive = re.compile(
@@ -632,12 +777,14 @@ def _metric_channel(
         re.I,
     )
     if row_hint and descriptive.search(row_hint):
-        return []
+        return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
 
     exact_slug = normalize_metric_slug(f"{row_hint} {metric}".strip())
     col_norm_hint = normalize_metric_slug(col_hint)
 
-    def _run_lookup(source_text: str, exact_text: str) -> list[sqlite3.Row]:
+    def _run_lookup(
+        source_text: str, exact_text: str, *, require_all_terms: bool
+    ) -> list[sqlite3.Row]:
         source_terms = content_tokens(source_text)
         seen_terms = set()
         uniq_source_terms = []
@@ -649,7 +796,7 @@ def _metric_channel(
         if not limited_terms:
             return []
 
-        join = " AND " if len(limited_terms) > 1 else " OR "
+        join = " AND " if require_all_terms and len(limited_terms) > 1 else " OR "
         like_clauses = join.join(["metric_slug LIKE ?"] * len(limited_terms))
         like_params = [f"%{term}%" for term in limited_terms]
 
@@ -686,21 +833,65 @@ def _metric_channel(
         )
         return list(conn.execute(sql, [exact_text, *like_params]))
 
-    rows = _run_lookup(source, exact_slug)
+    row_variants = _row_hint_variants(row_hint)
+    synonym_sources: list[str] = []
+    seen_variants = {exact_slug}
+    for row_variant in row_variants[1:]:
+        alt_source = normalize_metric_slug(f"{row_variant} {metric}".strip())
+        if not alt_source or alt_source in seen_variants:
+            continue
+        seen_variants.add(alt_source)
+        synonym_sources.append(alt_source)
 
-    if len(rows) < METRIC_SYNONYM_THRESHOLD:
-        variant_groups: list[list[sqlite3.Row]] = [rows]
-        seen_variants = {exact_slug}
-        row_variants = _row_hint_variants(row_hint)
-        for row_variant in row_variants[1:]:
-            alt_source = normalize_metric_slug(f"{row_variant} {metric}".strip())
-            if not alt_source or alt_source in seen_variants:
-                continue
-            seen_variants.add(alt_source)
-            variant_groups.append(_run_lookup(alt_source, alt_source))
-            if sum(len(group) for group in variant_groups) >= top_n:
-                break
-        rows = _merge_ranked_rows(*variant_groups, top_n=top_n)
+    stages: list[tuple[str, Callable[[], list[sqlite3.Row]]]] = []
+    if exact_slug:
+        stages.append(
+            (
+                "primary_exact",
+                lambda src=source, slug=exact_slug: _run_lookup(
+                    src,
+                    slug,
+                    require_all_terms=True,
+                ),
+            )
+        )
+
+    if synonym_sources:
+        stages.append(
+            (
+                "synonym_exact",
+                lambda alts=synonym_sources: _merge_ranked_rows(
+                    *[
+                        _run_lookup(alt_source, alt_source, require_all_terms=True)
+                        for alt_source in alts
+                    ],
+                    top_n=top_n,
+                ),
+            )
+        )
+
+    partial_sources = [exact_slug, *synonym_sources]
+    if partial_sources:
+        stages.append(
+            (
+                "partial_match",
+                lambda alts=partial_sources: _merge_ranked_rows(
+                    *[
+                        _run_lookup(partial_source, partial_source, require_all_terms=False)
+                        for partial_source in alts
+                        if partial_source
+                    ],
+                    top_n=top_n,
+                ),
+            )
+        )
+
+    trace = _collect_progressive_rows(
+        stages,
+        threshold=METRIC_SYNONYM_THRESHOLD,
+        top_n=top_n,
+    )
+    rows = trace.rows
 
     # Optional column-hint filter: if the col_hint has distinctive tokens,
     # intersect with col_label_lookup so we don't return tables that have
@@ -718,7 +909,15 @@ def _metric_channel(
         if col_ok:
             rows = [r for r in rows if r["id"] in col_ok]
 
-    return rows
+    return ChannelTrace(
+        rows=rows,
+        strategy_by_id={
+            rid: strategy
+            for rid, strategy in trace.strategy_by_id.items()
+            if rid in {int(r["id"]) for r in rows}
+        },
+        attempts=trace.attempts,
+    )
 
 
 # ── Top-level retrieve (two-channel union) ──────────────────────────────────
@@ -747,14 +946,14 @@ def retrieve(
     query_text = f"{question} {metric} {row_hint} {col_hint}".strip()
     q_tokens = content_tokens(query_text)
 
-    fts_rows = _fts_channel(
+    fts_trace = _fts_channel_trace(
         conn,
         q_tokens,
         target_years,
         wants_monthly,
         source_text=query_text,
     )
-    metric_rows = _metric_channel(
+    metric_trace = _metric_channel_trace(
         conn,
         metric,
         row_hint,
@@ -762,6 +961,8 @@ def retrieve(
         target_years,
         wants_monthly,
     )
+    fts_rows = fts_trace.rows
+    metric_rows = metric_trace.rows
 
     def _normalize_channel(rows: list[sqlite3.Row]) -> dict[int, float]:
         if not rows:
@@ -791,10 +992,14 @@ def retrieve(
             print(f"  no hits (fts={len(fts_rows)} metric={len(metric_rows)})", flush=True)
         return []
 
+    weighted_channel_scores: dict[int, tuple[float, float]] = {}
     reranked: list[tuple[float, sqlite3.Row]] = []
     for tid in all_ids:
         row = rows_by_id[tid]
-        s = 0.25 * metric_norm.get(tid, 0.0) + 0.75 * fts_norm.get(tid, 0.0)
+        fts_weighted = 0.75 * fts_norm.get(tid, 0.0)
+        metric_weighted = 0.25 * metric_norm.get(tid, 0.0)
+        weighted_channel_scores[tid] = (fts_weighted, metric_weighted)
+        s = metric_weighted + fts_weighted
         s += 0.08 * _file_year_bonus(
             row["file_year"],
             row["file_month"],
@@ -809,13 +1014,15 @@ def retrieve(
     if verbose:
         print(
             f"  fts={len(fts_rows)} metric={len(metric_rows)} "
-            f"union={len(all_ids)} years={target_years} mode={year_mode}",
+            f"union={len(all_ids)} years={target_years} mode={year_mode}"
+            f" fts_attempts={fts_trace.attempts} metric_attempts={metric_trace.attempts}",
             flush=True,
         )
 
     entries: list[dict] = []
     seen_files: set[str] = set()
     for _score, r in reranked:
+        row_id = int(r["id"])
         file = r["file"]
         if dedupe_by_file and file in seen_files:
             continue
@@ -841,6 +1048,14 @@ def retrieve(
         ).fetchall()
         years = sorted(int(y[0]) for y in year_rows if y[0] is not None)
 
+        strategy_parts = []
+        if row_id in fts_trace.strategy_by_id:
+            strategy_parts.append(f"fts:{fts_trace.strategy_by_id[row_id]}")
+        if row_id in metric_trace.strategy_by_id:
+            strategy_parts.append(f"metric:{metric_trace.strategy_by_id[row_id]}")
+        fts_weighted, metric_weighted = weighted_channel_scores.get(row_id, (0.0, 0.0))
+        best_channel = "fts" if fts_weighted >= metric_weighted else "metric"
+
         entry = {
             "file": file,
             "element_id": r["element_id"],
@@ -858,6 +1073,8 @@ def retrieve(
             "period": r["period"],
             "n_rows": r["n_rows"],
             "n_cols": r["n_cols"],
+            "retrieval_strategy": " | ".join(strategy_parts),
+            "retrieval_channel": best_channel,
             "html": _load_element_html(file, r["element_seq"]) if load_html else "",
         }
         entries.append(entry)
@@ -915,6 +1132,19 @@ def retrieve_from_ledger(
 # ── Intrinsic recall test (table-level, ledger-backed) ──────────────────────
 
 
+def _winning_hit_details(
+    results: list[dict],
+    gold_locs: set[tuple[str, int]],
+) -> tuple[int | None, str]:
+    for rank, entry in enumerate(results, 1):
+        if (entry["file"], entry["page_id"]) in gold_locs:
+            strategy = (
+                entry.get("retrieval_strategy") or entry.get("retrieval_channel") or "unknown"
+            )
+            return rank, strategy
+    return None, "none"
+
+
 def _test_recall_ledger(n: int = 0) -> None:
     """Table-level recall using the benchmark's (file, page) gold anchors."""
     import csv
@@ -957,6 +1187,7 @@ def _test_recall_ledger(n: int = 0) -> None:
         per_q_times.append(time.time() - qt)
 
         retrieved_locs = [(e["file"], e["page_id"]) for e in results]
+        winning_rank, winning_strategy = _winning_hit_details(results, gold_locs)
 
         top1 = any(loc in gold_locs for loc in retrieved_locs[:1])
         top5 = any(loc in gold_locs for loc in retrieved_locs[:5])
@@ -990,12 +1221,18 @@ def _test_recall_ledger(n: int = 0) -> None:
             )
         )
         dt_ms = per_q_times[-1] * 1000
+        strategy_msg = (
+            f" rank={winning_rank:<2d} via={winning_strategy}"
+            if winning_rank is not None
+            else " rank=-- via=none"
+        )
         running = (
             f"@1={hits_at_1}/{total} @5={hits_at_5}/{total} "
             f"@10={hits_at_10}/{total} @30={hits_at_30}/{total}"
         )
         print(
-            f"  [{i:3d}/{len(rows)}] {mark} {dt_ms:5.0f}ms  {running}  uid={row.get('uid', '?')}",
+            f"  [{i:3d}/{len(rows)}] {mark} {dt_ms:5.0f}ms  {strategy_msg}  "
+            f"{running}  uid={row.get('uid', '?')}",
             flush=True,
         )
 

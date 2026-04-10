@@ -12,8 +12,11 @@ from retrieve_v2 import (
     _extract_hints,
     _file_year_bonus,
     _fts_channel,
+    _fts_channel_trace,
     _metric_channel,
+    _metric_channel_trace,
     _row_hint_variants,
+    _winning_hit_details,
     content_tokens,
     detect_year_mode,
     normalize_metric_slug,
@@ -227,6 +230,51 @@ def test_fts_channel_skips_synonyms_when_exact_hits_enough():
     assert len(conn.calls) == 1
 
 
+def test_fts_channel_trace_runs_full_progressive_cascade():
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params):
+            file_year_between = "t.file_year BETWEEN ? AND ?" in sql
+            year_filter = "table_columns" in sql
+            query = params[0]
+            if (
+                file_year_between
+                and not year_filter
+                and ("outlays" in query or "military" in query)
+            ):
+                strategy = "synonym_year_window"
+            elif not file_year_between and ("outlays" in query or "military" in query):
+                strategy = "synonym_unrestricted"
+            elif file_year_between and year_filter and params[1:3] == [1945, 1950]:
+                strategy = "year_shifted"
+            elif file_year_between and year_filter and params[1:3] == [1940, 1944]:
+                strategy = "exact_year_filter"
+            elif file_year_between and not year_filter and params[1:3] == [1940, 1944]:
+                strategy = "exact_year_window"
+            else:
+                strategy = "unknown"
+            self.calls.append(strategy)
+            if strategy == "synonym_unrestricted":
+                return [{"id": 11, "score": -1.0}]
+            if strategy == "year_shifted":
+                return [{"id": 22, "score": -0.5}]
+            return []
+
+    conn = cast(Any, FakeConn())
+    trace = _fts_channel_trace(conn, ["expenditures", "defense"], [1940], False, top_n=10)
+    assert [name for name, _ in trace.attempts] == [
+        "exact_year_filter",
+        "exact_year_window",
+        "synonym_year_window",
+        "synonym_unrestricted",
+        "year_shifted",
+    ]
+    assert conn.calls == [name for name, _ in trace.attempts]
+    assert trace.strategy_by_id == {11: "synonym_unrestricted", 22: "year_shifted"}
+
+
 # ── Metric channel (requires ledger.sqlite) ──────────────────────────────────
 
 
@@ -304,6 +352,61 @@ def test_metric_channel_skips_synonyms_when_exact_hits_enough():
     )
     assert len(rows) == 6
     assert conn.calls == ["national defense expenditures"]
+
+
+def test_metric_channel_trace_uses_partial_match_after_synonyms():
+    class FakeConn:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, sql, params):
+            exact_text = params[0]
+            require_all_terms = "metric_slug LIKE ? AND metric_slug LIKE ?" in sql
+            if require_all_terms:
+                strategy = (
+                    "primary_exact"
+                    if exact_text == "national defense expenditures"
+                    else "synonym_exact"
+                )
+            else:
+                strategy = "partial_match"
+            self.calls.append((strategy, exact_text))
+            if strategy == "partial_match" and exact_text == "national defense expenditures":
+                return [{"id": 31, "score": -3.0}]
+            return []
+
+    conn = cast(Any, FakeConn())
+    trace = _metric_channel_trace(
+        conn,
+        "expenditures",
+        "national defense",
+        "",
+        [1940],
+        False,
+        top_n=5,
+    )
+    assert [name for name, _ in trace.attempts] == [
+        "primary_exact",
+        "synonym_exact",
+        "partial_match",
+    ]
+    assert trace.strategy_by_id == {31: "partial_match"}
+    assert ("partial_match", "national defense expenditures") in conn.calls
+
+
+# ── Retrieval transparency helpers ───────────────────────────────────────────
+
+
+def test_winning_hit_details_returns_rank_and_strategy():
+    rank, strategy = _winning_hit_details(
+        [
+            {"file": "a.json", "page_id": 1, "retrieval_strategy": "fts:exact_year_filter"},
+            {"file": "b.json", "page_id": 2, "retrieval_strategy": "metric:partial_match"},
+        ],
+        {("b.json", 2)},
+    )
+    assert rank == 2
+    assert strategy == "metric:partial_match"
 
 
 # ── Full retrieve (requires ledger.sqlite) ───────────────────────────────────
