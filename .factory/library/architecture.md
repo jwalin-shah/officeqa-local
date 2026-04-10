@@ -12,7 +12,7 @@ Question → scout() → decompose() → retrieve_for_spec() → [_try_determini
 ```
 
 ## Component Responsibilities
-- **solve.py** — orchestrator. Manages bounce-back loops (empty retrieve → re-decompose, verify fail → re-extract or re-decompose). Parallel eval via ThreadPoolExecutor. **Deterministic fast-path**: before LLM extraction, attempts resolve_cells() for each data_request. If ALL DRs resolve, skips LLM entirely; if ANY fails, falls back to normal LLM extraction.
+- **solve.py** — orchestrator. Manages bounce-back loops (empty retrieve → re-decompose, verify fail → re-extract or re-decompose). Parallel eval via ThreadPoolExecutor. **Deterministic fast-path**: before LLM extraction, attempts resolve_cells() for each data_request. Fully resolved DRs skip LLM extraction; unresolved DRs fall back to normal LLM extraction.
 - **scout.py** — deterministic. Calls retrieve_from_question() top-5 to ground decompose with real corpus labels.
 - **retrieve_v2.py** — deterministic. Two-channel funnel: FTS (broad) + metric substring (precise). Union + rerank. No LLM.
 - **extract.py** — LLM. Per-data-request context assembly. Renders HTML tables to pipe-delimited text. Returns structured JSON extractions.
@@ -50,8 +50,8 @@ The fast-path in `_run_extract_and_compute()` attempts to resolve all data_reque
 2. Get the best retrieved table entry → look up table_id from ledger
 3. Build cell specs based on granularity (annual: 1 cell, monthly_all: 12 cells, multi_year_annual: N cells)
 4. Call `resolve_cells(table_id, cells)` — does exact row_leaf/col_leaf matching
-5. If ALL DRs resolve with non-None values → return extractions dict, skip LLM
-6. If ANY DR has unresolved values → return None, fall back to LLM
+5. Return `(resolved_extractions, unresolved_ids)` from fast-path attempt
+6. If `unresolved_ids` is empty → skip LLM; otherwise call LLM only for unresolved DRs and merge
 
 **Key helpers in solve.py:**
 - `_fp_conn()` — thread-local ledger connection for fast-path queries
@@ -63,7 +63,7 @@ The fast-path in `_run_extract_and_compute()` attempts to resolve all data_reque
 - Requires exact row_leaf/col_leaf match — fuzzy matches fall through to LLM
 - External/CPI/FX source DRs automatically fail (can't resolve from ledger)
 - Prose/footnote entries are skipped (no table to resolve from)
-- Currently the fast-path is all-or-nothing: if any DR fails, all DRs go to LLM
+- Fast-path is partial by design: resolved DRs are kept and only unresolved DRs go to LLM
 
 ## Monthly Pre-Extraction & CY Row Filtering
 

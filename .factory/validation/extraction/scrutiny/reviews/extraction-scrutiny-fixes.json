@@ -1,0 +1,34 @@
+{
+  "featureId": "extraction-scrutiny-fixes",
+  "reviewedAt": "2026-04-10T21:38:21Z",
+  "commitId": "d66f9df",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Commit d66f9df correctly fixes month false positives, implements partial deterministic fast-path fallback, and updates oracle n=50 metrics; however one previously blocking extraction issue remains unresolved, so this rerun does not fully clear prior scrutiny blockers.",
+    "issues": [
+      {
+        "file": "extract.py",
+        "line": 1265,
+        "severity": "blocking",
+        "description": "CY row filtering still runs solely on `granularity == \"monthly_all\"` (and `filter_cy_rows()` is keyed only by granularity at line 993) instead of explicit calendar-year targeting. This is the same blocking issue reported for monthly-pre-extraction-and-row-filtering and can still over-filter non-CY monthly requests."
+      },
+      {
+        "file": "tests/test_extraction.py",
+        "line": 1405,
+        "severity": "non_blocking",
+        "description": "`test_extract_structured_adds_pre_extraction_annotation` remains non-assertive: both branches end with `pass` (lines 1406 and 1411), so regression of the annotation behavior would not fail the test."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "Shared architecture documentation is stale about deterministic fast-path behavior.",
+      "evidence": ".factory/library/architecture.md lines 15, 54, and 66 still describe all-or-nothing fallback, while solve.py lines 769-806 now implement partial per-DR fallback by merging `resolved_extractions` with LLM output for `unresolved_ids` only."
+    }
+  ],
+  "addressesFailureFrom": "/Users/jwalinshah/projects/officeqa-local/.factory/validation/extraction/scrutiny/synthesis.json",
+  "summary": "This fix feature resolves 3 of 4 prior extraction blockers (month detection false positives, deterministic partial fallback, and oracle n=50 baseline update). One blocking issue from monthly-pre-extraction-and-row-filtering remains, so overall rerun review status is fail."
+}
