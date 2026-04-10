@@ -1,0 +1,26 @@
+{
+  "featureId": "synonym-expansion",
+  "reviewedAt": "2026-04-10T19:25:31Z",
+  "commitId": "a66a18fcfabff25d39ab7c9806d57784ea60f7f1",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The feature implementation satisfies the stated requirements: retrieve_v2.py includes a >=12-group arena-style synonym dictionary, FTS synonym expansion is progressive behind an exact-hit threshold, metric row-hint synonym variants are also progressive, and tests were added for synonym coverage plus exact-first behavior in both channels.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The pipeline-worker skill still prescribes strict red-phase TDD (tests must fail before implementation), but this worker flow applied patches before the first targeted retrieval test run and still marked followedProcedure=true. This suggests procedure/doc mismatch in current mission reality.",
+      "evidence": ".factory/skills/pipeline-worker/SKILL.md Step 2 vs worker-transcripts.jsonl entry for workerSessionId a822afbf-5066-4e19-8b07-74bcb82cab45 (ApplyPatch calls appear before first `uv run pytest tests/test_retrieval.py -v`)."
+    },
+    {
+      "area": "services",
+      "observation": "Worker used manual Bandit scans during verification, but `.factory/services.yaml` does not expose a security-scan command, so this recurring validation step is not discoverable via shared service commands.",
+      "evidence": "worker-transcripts.jsonl entry for workerSessionId a822afbf-5066-4e19-8b07-74bcb82cab45 includes `uv run bandit -q retrieve_v2.py`; `.factory/services.yaml` has test/lint/typecheck commands but no bandit/security command."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed the synonym-expansion handoff, transcript skeleton, skill procedure, and commit diff. The feature meets its functional requirements with no blocking correctness/security/reliability defects found in the reviewed changes."
+}

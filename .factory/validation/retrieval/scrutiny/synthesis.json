@@ -1,0 +1,83 @@
+{
+  "milestone": "retrieval",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "uv run pytest --tb=short -q",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "uv run pyright",
+      "exitCode": 1,
+      "note": "240 errors in full-repo pyright are pre-existing (legacy files + archive_from_arena + known build_ledger/agent issues). Retrieval milestone files pass scoped check: `uv run pyright retrieve_v2.py tests/test_retrieval.py` -> 0 errors."
+    },
+    "lint": {
+      "passed": true,
+      "command": "uv run ruff check .",
+      "exitCode": 1,
+      "note": "1523 full-repo lint errors are pre-existing in untouched files (archive_from_arena and legacy scripts). Retrieval milestone files pass scoped lint: `uv run ruff check retrieve_v2.py tests/test_retrieval.py` -> All checks passed."
+    }
+  },
+  "reviewsSummary": {
+    "total": 5,
+    "passed": 2,
+    "failed": 3,
+    "failedFeatures": [
+      "prose-footnote-retrieval",
+      "row-hint-alternatives-and-multi-request",
+      "retrieval-eval-and-edge-cases"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "prose-footnote-retrieval",
+      "severity": "blocking",
+      "description": "retrieve_v2.py appends prose/footnote entries after collecting top_k table entries, so retrieve() can return more than top_k (contract regression and potential downstream context bloat/latency)."
+    },
+    {
+      "featureId": "row-hint-alternatives-and-multi-request",
+      "severity": "blocking",
+      "description": "Period-aware score delta is scaled by 0.2 during reranking, reducing effective boost/penalty below the feature's stated thresholds (+0.5/-0.3)."
+    },
+    {
+      "featureId": "retrieval-eval-and-edge-cases",
+      "severity": "blocking",
+      "description": "Zero-results edge-case tests do not assert the required [] contract when both channels return zero hits; assertions currently allow non-empty results."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skills",
+      "suggestion": "Update pipeline-worker validation procedure to explicitly allow scoped lint/typecheck when mission AGENTS.md declares known repo-wide baseline failures, while still requiring full validation on touched files.",
+      "evidence": "multi-strategy-search review noted conflict between `.factory/skills/pipeline-worker/SKILL.md` full-repo validator wording and mission AGENTS.md scoped-validator convention.",
+      "isSystemic": true
+    },
+    {
+      "target": "skills",
+      "suggestion": "Relax strict red-phase TDD wording for migration/data/eval-heavy features where a literal failing-test-first flow is impractical, and permit equivalent evidence-first validation patterns.",
+      "evidence": "synonym-expansion and row-hint-alternatives reviews observed repeated transcript/skill mismatch around mandatory red phase despite correct implementations.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Update retrieval architecture description to reflect prose/footnote integration (no longer strictly two-channel FTS+metric).",
+      "evidence": "prose-footnote-retrieval review found stale shared-state wording in mission AGENTS/library docs after channel expansion.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Add a Bandit security command to services.yaml immediately.",
+      "reason": "useful but not yet standardized for this mission; defer to orchestrator to decide naming/scope for a cross-milestone security command."
+    },
+    {
+      "observation": "TDD red-phase mismatch from row-hint review as separate recommendation.",
+      "reason": "duplicate — consolidated into one systemic skills recommendation."
+    }
+  ],
+  "previousRound": null
+}
