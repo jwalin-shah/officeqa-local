@@ -1,0 +1,11 @@
+commands:
+  install: uv sync
+  test: uv run pytest --tb=short -q
+  lint: uv run ruff check .
+  typecheck: uv run pyright
+  retrieval_recall: uv run python retrieve_v2.py --test
+  ledger_reachability: uv run python eval_ledger.py
+  oracle_extract: uv run python extract.py --test-oracle --n 20
+  sample_eval: uv run python solve.py --eval --n 20
+  full_eval: uv run python solve.py --eval
+  build_ledger: uv run python build_ledger.py
