@@ -1,0 +1,32 @@
+{
+  "retrieval": {
+    "recall_at_1": 6.5,
+    "recall_at_5": 19.1,
+    "recall_at_10": 25.6,
+    "recall_at_20": 31.7,
+    "recall_at_30": 35.8,
+    "file_level_recall_at_10": 62.2,
+    "total_questions": 246,
+    "elapsed_s": 15.8
+  },
+  "ledger": {
+    "reachability_file": 100.0,
+    "reachability_page": 94.3,
+    "reachability_page_any": 94.7,
+    "cell_present_page_numeric_pct": 47.7,
+    "total_questions": 246
+  },
+  "oracle_extraction": {
+    "accuracy": 35.0,
+    "n": 20
+  },
+  "decompose_validation": {
+    "total_lines": 246,
+    "parse_errors": 0,
+    "valid_specs": 234,
+    "missing_specs": 12,
+    "row_hint_present": 230,
+    "row_hint_pct": 98.3,
+    "row_hint_pct_of_total": 93.5
+  }
+}
