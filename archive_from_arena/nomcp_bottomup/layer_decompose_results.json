@@ -1,0 +1,2168 @@
+[
+  {
+    "uid": "DEC_01",
+    "pass": false,
+    "issues": [
+      "expected 1 sub-queries, got 12",
+      "expected monthly_series/all_12 in at least one sub-query"
+    ],
+    "num_subqueries": 12,
+    "computation_type": "sum",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A1",
+          "description": "National defense expenditures for January 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            1
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "January"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A2",
+          "description": "National defense expenditures for February 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            2
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "February"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A3",
+          "description": "National defense expenditures for March 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            3
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "March"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A4",
+          "description": "National defense expenditures for April 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            4
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "April"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A5",
+          "description": "National defense expenditures for May 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            5
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "May"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A6",
+          "description": "National defense expenditures for June 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            6
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "June"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A7",
+          "description": "National defense expenditures for July 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            7
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "July"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A8",
+          "description": "National defense expenditures for August 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            8
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "August"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A9",
+          "description": "National defense expenditures for September 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            9
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "September"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A10",
+          "description": "National defense expenditures for October 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            10
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "October"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A11",
+          "description": "National defense expenditures for November 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            11
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "November"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A12",
+          "description": "National defense expenditures for December 1940",
+          "search_terms": [
+            "Federal Fiscal Operations",
+            "Budget Expenditures by Major Functions",
+            "National Defense"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            12
+          ],
+          "data_year": 1940,
+          "data_months": "specific",
+          "specific_months": [
+            "December"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        }
+      ],
+      "computation": {
+        "type": "sum",
+        "description": "Sum all 12 monthly national defense expenditure values to get calendar year 1940 total",
+        "formula": "A1 + A2 + A3 + A4 + A5 + A6 + A7 + A8 + A9 + A10 + A11 + A12"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": 2,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "DEC_02",
+    "pass": true,
+    "issues": [],
+    "num_subqueries": 1,
+    "computation_type": "direct",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A",
+          "description": "Veterans Administration total expenditures for FY 1934, including public works, excluding revolving funds and trust fund transfers. Need to find table showing VA expenditures by agency/function.",
+          "search_terms": [
+            "Veterans Administration",
+            "expenditures",
+            "Veterans",
+            "public works",
+            "FFO-3",
+            "by agency",
+            "by function"
+          ],
+          "target_bulletin_year": 1939,
+          "target_bulletin_months": [
+            "12"
+          ],
+          "data_year": 1934,
+          "data_months": "none",
+          "specific_months": [],
+          "value_type": "annual_total",
+          "period_basis": "fiscal"
+        }
+      ],
+      "computation": {
+        "type": "direct",
+        "description": "Return the VA expenditure value from the bulletin as a single annual total for FY 1934",
+        "formula": "A"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": null,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "DEC_03",
+    "pass": false,
+    "issues": [
+      "expected 1 sub-queries, got 12"
+    ],
+    "num_subqueries": 12,
+    "computation_type": "sum",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A1",
+          "description": "National defense expenditures for January 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            1
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            1
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A2",
+          "description": "National defense expenditures for February 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            2
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            2
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A3",
+          "description": "National defense expenditures for March 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            3
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            3
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A4",
+          "description": "National defense expenditures for April 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            4
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            4
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A5",
+          "description": "National defense expenditures for May 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            5
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            5
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A6",
+          "description": "National defense expenditures for June 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            6
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            6
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A7",
+          "description": "National defense expenditures for July 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            7
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            7
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A8",
+          "description": "National defense expenditures for August 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            8
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            8
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A9",
+          "description": "National defense expenditures for September 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            9
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            9
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A10",
+          "description": "National defense expenditures for October 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            10
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            10
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A11",
+          "description": "National defense expenditures for November 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            11
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            11
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "A12",
+          "description": "National defense expenditures for December 1953",
+          "search_terms": [
+            "defense",
+            "national defense",
+            "expenditures",
+            "military"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            12
+          ],
+          "data_year": 1953,
+          "data_months": "none",
+          "specific_months": [
+            12
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        }
+      ],
+      "computation": {
+        "type": "sum",
+        "description": "Sum all 12 monthly defense expenditure values for calendar year 1953",
+        "formula": "sum(A1 + A2 + A3 + A4 + A5 + A6 + A7 + A8 + A9 + A10 + A11 + A12)"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": null,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "DEC_04",
+    "pass": false,
+    "issues": [
+      "computation type: got 'custom', expected one of ['percent_change']"
+    ],
+    "num_subqueries": 2,
+    "computation_type": "custom",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A",
+          "description": "Monthly national defense and associated activities expenditures for all 12 months of 1953",
+          "search_terms": [
+            "National defense",
+            "defense expenditures",
+            "by major functions",
+            "budget expenditures classified"
+          ],
+          "target_bulletin_year": 1953,
+          "target_bulletin_months": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "data_year": 1953,
+          "data_months": "all_12",
+          "specific_months": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "B",
+          "description": "Monthly national defense and associated activities expenditures for all 12 months of 1940",
+          "search_terms": [
+            "National defense",
+            "defense expenditures",
+            "by major functions",
+            "budget expenditures classified"
+          ],
+          "target_bulletin_year": 1940,
+          "target_bulletin_months": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "data_year": 1940,
+          "data_months": "all_12",
+          "specific_months": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12
+          ],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        }
+      ],
+      "computation": {
+        "type": "custom",
+        "description": "First sum all 12 monthly values for 1953 to get total_A, then sum all 12 monthly values for 1940 to get total_B, then calculate absolute percent change",
+        "formula": "abs((sum(A) - sum(B)) / sum(B)) * 100"
+      },
+      "output_format": {
+        "units": "percent",
+        "rounding": 2,
+        "suffix": "%"
+      }
+    }
+  },
+  {
+    "uid": "DEC_05",
+    "pass": true,
+    "issues": [],
+    "num_subqueries": 1,
+    "computation_type": "custom",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A",
+          "description": "Find U.S. government claims on foreign countries (excluding territories and regional aggregates) for calendar year 1995. Look for tables showing claims by country, likely in the International Financial Statistics section.",
+          "search_terms": [
+            "U.S. claims on foreigners",
+            "foreign claims",
+            "claims by country",
+            "international capital movements",
+            "foreign debt"
+          ],
+          "target_bulletin_year": 1996,
+          "target_bulletin_months": [
+            3
+          ],
+          "data_year": 1995,
+          "data_months": "all_12",
+          "specific_months": [],
+          "value_type": "series",
+          "period_basis": "calendar"
+        }
+      ],
+      "computation": {
+        "type": "custom",
+        "description": "From the collected country-level claims data for calendar year 1995, identify the maximum value (highest single country claim). Exclude territories (Puerto Rico, Guam, etc.) and regional aggregates (e.g., 'Europe', 'Asia', 'OPEC', 'Latin America').",
+        "formula": "max(A) - but only after filtering to exclude territories and regional aggregates"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": null,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "DEC_06",
+    "pass": true,
+    "issues": [],
+    "num_subqueries": 1,
+    "computation_type": "direct",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A",
+          "description": "Find the nominal long-term Treasury bond yield for December 1963",
+          "search_terms": [
+            "Average Yields of Long-Term Bonds",
+            "Treasury bond yields",
+            "long-term bond yields"
+          ],
+          "target_bulletin_year": 1963,
+          "target_bulletin_months": [
+            12
+          ],
+          "data_year": 1963,
+          "data_months": "specific",
+          "specific_months": [
+            12
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        }
+      ],
+      "computation": {
+        "type": "direct",
+        "description": "Return the December 1963 long-term bond yield value as-is",
+        "formula": "A"
+      },
+      "output_format": {
+        "units": "percent",
+        "rounding": 2,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "DEC_07",
+    "pass": true,
+    "issues": [],
+    "num_subqueries": 1,
+    "computation_type": "direct",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A",
+          "description": "Find the highest spending federal department in FY 1955 by looking at expenditures by agency in the Federal Fiscal Operations section. Need to identify which department had the maximum outlay.",
+          "search_terms": [
+            "expenditures by agency",
+            "outlays by agency",
+            "budget expenditures by agency",
+            "FFO-3"
+          ],
+          "target_bulletin_year": 1955,
+          "target_bulletin_months": [
+            7
+          ],
+          "data_year": 1955,
+          "data_months": "none",
+          "specific_months": [],
+          "value_type": "annual_total",
+          "period_basis": "fiscal"
+        }
+      ],
+      "computation": {
+        "type": "direct",
+        "description": "Return the maximum value from the agency expenditure table for FY 1955, which represents the highest spending department.",
+        "formula": "A"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": null,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "DEC_08",
+    "pass": false,
+    "issues": [
+      "expected 1 sub-queries, got 12",
+      "expected monthly_series/all_12 in at least one sub-query"
+    ],
+    "num_subqueries": 12,
+    "computation_type": "sum",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A",
+          "description": "Interest outlays (gross, excluding offsets) for January 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "01"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "01"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "B",
+          "description": "Interest outlays (gross, excluding offsets) for February 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "02"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "02"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "C",
+          "description": "Interest outlays (gross, excluding offsets) for March 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "03"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "03"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "D",
+          "description": "Interest outlays (gross, excluding offsets) for April 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "04"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "04"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "E",
+          "description": "Interest outlays (gross, excluding offsets) for May 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "05"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "05"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "F",
+          "description": "Interest outlays (gross, excluding offsets) for June 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "06"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "06"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "G",
+          "description": "Interest outlays (gross, excluding offsets) for July 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "07"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "07"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "H",
+          "description": "Interest outlays (gross, excluding offsets) for August 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "08"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "08"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "I",
+          "description": "Interest outlays (gross, excluding offsets) for September 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "09"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "09"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "J",
+          "description": "Interest outlays (gross, excluding offsets) for October 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "10"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "10"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "K",
+          "description": "Interest outlays (gross, excluding offsets) for November 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "11"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "11"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "L",
+          "description": "Interest outlays (gross, excluding offsets) for December 1981 from Budget Outlays by Function table",
+          "search_terms": [
+            "Budget Outlays by Function",
+            "Interest",
+            "gross"
+          ],
+          "target_bulletin_year": 1981,
+          "target_bulletin_months": [
+            "12"
+          ],
+          "data_year": 1981,
+          "data_months": "specific",
+          "specific_months": [
+            "12"
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        }
+      ],
+      "computation": {
+        "type": "sum",
+        "description": "Sum all 12 monthly interest outlay values for calendar year 1981",
+        "formula": "A + B + C + D + E + F + G + H + I + J + K + L"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": null,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "DEC_09",
+    "pass": true,
+    "issues": [],
+    "num_subqueries": 2,
+    "computation_type": "difference",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A",
+          "description": "Total budget receipts for FY 1950",
+          "search_terms": [
+            "Budget Receipts",
+            "total receipts",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1950,
+          "target_bulletin_months": [
+            6
+          ],
+          "data_year": 1950,
+          "data_months": "none",
+          "specific_months": [],
+          "value_type": "annual_total",
+          "period_basis": "fiscal"
+        },
+        {
+          "id": "B",
+          "description": "Total budget receipts for FY 1949",
+          "search_terms": [
+            "Budget Receipts",
+            "total receipts",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1949,
+          "target_bulletin_months": [
+            6
+          ],
+          "data_year": 1949,
+          "data_months": "none",
+          "specific_months": [],
+          "value_type": "annual_total",
+          "period_basis": "fiscal"
+        }
+      ],
+      "computation": {
+        "type": "difference",
+        "description": "Calculate absolute difference between FY 1950 and FY 1949 total budget receipts",
+        "formula": "abs(A - B)"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": null,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "DEC_10",
+    "pass": false,
+    "issues": [
+      "missing data_year 1960 in range (found {'1960-1969'})"
+    ],
+    "num_subqueries": 1,
+    "computation_type": "custom",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A",
+          "description": "Monthly yields for US Treasury bonds and US Corporate Aa bonds (Moody's) from the Average Yields of Long-Term Bonds section",
+          "search_terms": [
+            "Average Yields of Long-Term Bonds",
+            "Treasury bonds",
+            "Corporate Aa",
+            "Moody's"
+          ],
+          "target_bulletin_year": 1970,
+          "target_bulletin_months": [
+            6
+          ],
+          "data_year": "1960-1969",
+          "data_months": "all_12",
+          "specific_months": [],
+          "value_type": "monthly_series",
+          "period_basis": "calendar"
+        }
+      ],
+      "computation": {
+        "type": "custom",
+        "description": "For each month from 1960-1969, calculate the spread (Corporate Aa yield minus Treasury yield), then compute the arithmetic mean of all monthly spreads across the 10-year period",
+        "formula": "mean(Corporate_Aa_yields - Treasury_yields for all 120 months)"
+      },
+      "output_format": {
+        "units": "percent",
+        "rounding": 5,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "DEC_11",
+    "pass": false,
+    "error": "no_response"
+  },
+  {
+    "uid": "DEC_12",
+    "pass": true,
+    "issues": [],
+    "num_subqueries": 3,
+    "computation_type": "custom",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A",
+          "description": "Total bank deposits of individuals, partnerships, and corporations in New Haven metropolitan area as of last day of 1942",
+          "search_terms": [
+            "New Haven",
+            "bank deposits",
+            "individuals partnerships corporations",
+            "metropolitan area"
+          ],
+          "target_bulletin_year": 1943,
+          "target_bulletin_months": [
+            "12"
+          ],
+          "data_year": 1942,
+          "data_months": "none",
+          "specific_months": [],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "B",
+          "description": "Total bank deposits of individuals, partnerships, and corporations in New Haven metropolitan area as of last day of 1943",
+          "search_terms": [
+            "New Haven",
+            "bank deposits",
+            "individuals partnerships corporations",
+            "metropolitan area"
+          ],
+          "target_bulletin_year": 1944,
+          "target_bulletin_months": [
+            "12"
+          ],
+          "data_year": 1943,
+          "data_months": "none",
+          "specific_months": [],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "C",
+          "description": "Total bank deposits of individuals, partnerships, and corporations in New Haven metropolitan area as of last day of 1944",
+          "search_terms": [
+            "New Haven",
+            "bank deposits",
+            "individuals partnerships corporations",
+            "metropolitan area"
+          ],
+          "target_bulletin_year": 1945,
+          "target_bulletin_months": [
+            "12"
+          ],
+          "data_year": 1944,
+          "data_months": "none",
+          "specific_months": [],
+          "value_type": "single",
+          "period_basis": "calendar"
+        }
+      ],
+      "computation": {
+        "type": "custom",
+        "description": "Calculate percentage increases, normalize to form two point distributions, then compute KL divergence",
+        "formula": "pct_increase_43 = (B - A) / A; pct_increase_44 = (C - B) / B; p = pct_increase_43 / (pct_increase_43 + pct_increase_44); q = pct_increase_44 / (pct_increase_43 + pct_increase_44); kl_div = p * log(p / q) + (1 - p) * log((1 - p) / (1 - q))"
+      },
+      "output_format": {
+        "units": "other",
+        "rounding": null,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "DEC_13",
+    "pass": false,
+    "error": "json_parse: Expecting value: line 1 column 1 (char 0)",
+    "raw": "<minimax:tool_call>\n<invoke name=\"open-library_get_bulletins\">\n<parameter name=\"start_year\">1955</parameter>\n<parameter name=\"end_year\">1960</parameter>\n</invoke>\n</minimax:tool_call>"
+  },
+  {
+    "uid": "DEC_14",
+    "pass": true,
+    "issues": [],
+    "num_subqueries": 39,
+    "computation_type": "geometric_mean",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A",
+          "description": "US judiciary outlays for January 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            1
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            1
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "B",
+          "description": "US judiciary outlays for February 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            2
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            2
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "C",
+          "description": "US judiciary outlays for March 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            3
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            3
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "D",
+          "description": "US judiciary outlays for April 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            4
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            4
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "E",
+          "description": "US judiciary outlays for May 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            5
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            5
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "F",
+          "description": "US judiciary outlays for June 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            6
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            6
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "G",
+          "description": "US judiciary outlays for July 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            7
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            7
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "H",
+          "description": "US judiciary outlays for August 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            8
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            8
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "I",
+          "description": "US judiciary outlays for September 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            9
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            9
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "J",
+          "description": "US judiciary outlays for October 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            10
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            10
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "K",
+          "description": "US judiciary outlays for November 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            11
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            11
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "L",
+          "description": "US judiciary outlays for December 1984",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1984,
+          "target_bulletin_months": [
+            12
+          ],
+          "data_year": 1984,
+          "data_months": "specific",
+          "specific_months": [
+            12
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "M",
+          "description": "US judiciary outlays for January 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            1
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            1
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "N",
+          "description": "US judiciary outlays for February 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            2
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            2
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "O",
+          "description": "US judiciary outlays for March 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            3
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            3
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "P",
+          "description": "US judiciary outlays for April 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            4
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            4
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "Q",
+          "description": "US judiciary outlays for May 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            5
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            5
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "R",
+          "description": "US judiciary outlays for June 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            6
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            6
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "S",
+          "description": "US judiciary outlays for July 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            7
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            7
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "T",
+          "description": "US judiciary outlays for August 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            8
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            8
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "U",
+          "description": "US judiciary outlays for September 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            9
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            9
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "V",
+          "description": "US judiciary outlays for October 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            10
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            10
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "W",
+          "description": "US judiciary outlays for November 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            11
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            11
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "X",
+          "description": "US judiciary outlays for December 1985",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1985,
+          "target_bulletin_months": [
+            12
+          ],
+          "data_year": 1985,
+          "data_months": "specific",
+          "specific_months": [
+            12
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "Y",
+          "description": "US judiciary outlays for January 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            1
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            1
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "Z",
+          "description": "US judiciary outlays for February 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            2
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            2
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AA",
+          "description": "US judiciary outlays for March 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            3
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            3
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AB",
+          "description": "US judiciary outlays for April 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            4
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            4
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AC",
+          "description": "US judiciary outlays for May 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            5
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            5
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AD",
+          "description": "US judiciary outlays for June 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            6
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            6
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AE",
+          "description": "US judiciary outlays for July 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            7
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            7
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AF",
+          "description": "US judiciary outlays for August 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            8
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            8
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AG",
+          "description": "US judiciary outlays for September 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            9
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            9
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AH",
+          "description": "US judiciary outlays for October 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            10
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            10
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AI",
+          "description": "US judiciary outlays for November 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            11
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            11
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AJ",
+          "description": "US judiciary outlays for December 1986",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1986,
+          "target_bulletin_months": [
+            12
+          ],
+          "data_year": 1986,
+          "data_months": "specific",
+          "specific_months": [
+            12
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AK",
+          "description": "US judiciary outlays for January 1987",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1987,
+          "target_bulletin_months": [
+            1
+          ],
+          "data_year": 1987,
+          "data_months": "specific",
+          "specific_months": [
+            1
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AL",
+          "description": "US judiciary outlays for February 1987",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1987,
+          "target_bulletin_months": [
+            2
+          ],
+          "data_year": 1987,
+          "data_months": "specific",
+          "specific_months": [
+            2
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "AM",
+          "description": "US judiciary outlays for March 1987",
+          "search_terms": [
+            "judiciary",
+            "outlays by agency",
+            "FFO-3",
+            "Federal Fiscal Operations"
+          ],
+          "target_bulletin_year": 1987,
+          "target_bulletin_months": [
+            3
+          ],
+          "data_year": 1987,
+          "data_months": "specific",
+          "specific_months": [
+            3
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        }
+      ],
+      "computation": {
+        "type": "geometric_mean",
+        "description": "Calculate the geometric mean of all 39 monthly judiciary outlay values from Jan 1984 to Mar 1987",
+        "formula": "(A * B * C * D * E * F * G * H * I * J * K * L * M * N * O * P * Q * R * S * T * U * V * W * X * Y * Z * AA * AB * AC * AD * AE * AF * AG * AH * AI * AJ * AK * AL * AM) ** (1/39)"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": 0.001,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "DEC_15",
+    "pass": true,
+    "issues": [],
+    "num_subqueries": 2,
+    "computation_type": "percent_change",
+    "plan": {
+      "sub_queries": [
+        {
+          "id": "A",
+          "description": "Net budget receipts from Employment and General Retirement for February 2012 (FY2013 budget proposal release month)",
+          "search_terms": [
+            "Employment and General Retirement",
+            "net budget receipts",
+            "Budget Receipts Classified as General by Major Sources"
+          ],
+          "target_bulletin_year": 2012,
+          "target_bulletin_months": [
+            2
+          ],
+          "data_year": 2012,
+          "data_months": "specific",
+          "specific_months": [
+            2
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        },
+        {
+          "id": "B",
+          "description": "Net budget receipts from Employment and General Retirement for March 2023 (FY2023 budget proposal release month)",
+          "search_terms": [
+            "Employment and General Retirement",
+            "net budget receipts",
+            "Budget Receipts Classified as General by Major Sources"
+          ],
+          "target_bulletin_year": 2023,
+          "target_bulletin_months": [
+            3
+          ],
+          "data_year": 2023,
+          "data_months": "specific",
+          "specific_months": [
+            3
+          ],
+          "value_type": "single",
+          "period_basis": "calendar"
+        }
+      ],
+      "computation": {
+        "type": "percent_change",
+        "description": "Calculate percentage change from February 2012 value to March 2023 value",
+        "formula": "abs((B - A) / A) * 100"
+      },
+      "output_format": {
+        "units": "percent",
+        "rounding": 0,
+        "suffix": "%"
+      }
+    }
+  }
+]

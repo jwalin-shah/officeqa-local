@@ -1,6 +1,43 @@
-.env
+# --- Python / env ---
 .venv/
 __pycache__/
 *.pyc
+*.egg-info/
+.coverage
+htmlcov/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# --- Secrets / OS ---
+.env
+token.json
 .DS_Store
+
+# --- Logs ---
 *.log
+
+# --- Local agent / tool state ---
+.claude/
+.tldr/
+CLAUDE.md.new
+
+# --- Corpus (large, regenerable from source) ---
+corpus_json/
+corpus_index.pkl
+
+# --- Ledger / generated databases ---
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite.bak
+files.db
+files.db-shm
+files.db-wal
+
+# --- Eval scratch outputs ---
+# JSONL eval outputs are regenerable scratch — commit gold fixtures explicitly.
+*.jsonl
+
+# --- Scratch analysis notes (keep PLAN.md, README.md, docs/) ---
+funnel_analysis.md

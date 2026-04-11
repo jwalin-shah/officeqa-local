@@ -33,7 +33,11 @@ client = OpenAI(
 )
 
 
-# Shared with extract.py so both phases reason from the same rules.
+# Kept in sync with the EXTRACTION CHECKLIST in extract.py so both phases
+# reason from the same failure modes. Verify's wording is action-oriented
+# (apply the fix post-hoc); extract's wording is prevention-oriented (don't
+# produce the error in the first place). If you add a rule here, mirror it
+# in extract.EXTRACT_STRUCTURED_SYSTEM.
 CHECKLIST = """Treasury Bulletin answer checklist:
 
 1. UNITS. If the question says "dollars" and the table header says "(in

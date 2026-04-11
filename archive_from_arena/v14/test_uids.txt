@@ -1,0 +1,21 @@
+# Known PASS (should stay passing)
+UID0001
+UID0003
+UID0033
+UID0097
+
+# Flaky 67% (should stabilize)
+UID0008
+UID0011
+UID0021
+UID0026
+
+# Flaky 40% (stretch goals)
+UID0004
+UID0017
+UID0050
+
+# Always FAIL (test for improvement)
+UID0027
+UID0028
+UID0041

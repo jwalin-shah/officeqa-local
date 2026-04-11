@@ -1,0 +1,26 @@
+name: officeqa-v14
+version: 14.0.0
+competition: grounded-reasoning
+
+agent:
+  type: harness
+  harness_name: goose
+  model: openrouter/minimax/minimax-m2.5
+  prompt_template_path: v14/prompts/system.j2
+
+  mcp_servers:
+    officeqa:
+      type: stdio
+      command: python3
+      args:
+        - /installed-agent/v14/server/mcp_stdio.py
+
+  env:
+    OPENROUTER_API_KEY: "${oc.env:OPENROUTER_API_KEY}"
+    # These may bypass Harbor's recipe construction since env takes priority
+    GOOSE_MAX_TURNS: "15"
+    GOOSE_TEMPERATURE: "0.0"
+    GOOSE_CONTEXT_LIMIT: "128000"
+
+environment:
+  timeout_per_task: 300

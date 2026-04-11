@@ -25,6 +25,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from rapidfuzz import fuzz, process
 
 LEDGER_PATH = Path(__file__).parent / "ledger.sqlite"
 
@@ -308,6 +309,343 @@ def find_tables(
         }
         for r in rows
     ]
+
+
+# ─── Slug vocabulary cache for full-vocab fuzzy matching ──────────────────
+# Loaded lazily on first use. ~121K distinct slugs, each mapping to the list
+# of table_ids whose rows carry that slug. Memory footprint ~15-25MB.
+_SLUG_VOCAB_LOCK = threading.Lock()
+_SLUG_VOCAB: list[str] | None = None  # ordered list of distinct slugs
+_SLUG_TO_TABLES: dict[str, list[int]] | None = None  # slug → [table_id, ...]
+
+
+def _load_slug_vocab() -> tuple[list[str], dict[str, list[int]]]:
+    """Load the full metric_slug vocabulary into memory.
+
+    Cached per-process. First call takes ~2-3s to walk row_label_lookup;
+    subsequent calls are free. Used by the slug channel's full-vocab
+    fuzzy fallback when LIKE-based recall comes up thin.
+    """
+    global _SLUG_VOCAB, _SLUG_TO_TABLES
+    if _SLUG_VOCAB is not None and _SLUG_TO_TABLES is not None:
+        return _SLUG_VOCAB, _SLUG_TO_TABLES
+    with _SLUG_VOCAB_LOCK:
+        if _SLUG_VOCAB is not None and _SLUG_TO_TABLES is not None:
+            return _SLUG_VOCAB, _SLUG_TO_TABLES
+        conn = _conn()
+        d: dict[str, list[int]] = {}
+        for slug, tid in conn.execute("SELECT metric_slug, table_id FROM row_label_lookup"):
+            if not slug:
+                continue
+            d.setdefault(slug, []).append(tid)
+        _SLUG_VOCAB = list(d.keys())
+        _SLUG_TO_TABLES = d
+    return _SLUG_VOCAB, _SLUG_TO_TABLES
+
+
+_MONTH_NAMES = {
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "sept",
+    "oct",
+    "nov",
+    "dec",
+    "jan.",
+    "feb.",
+    "mar.",
+    "apr.",
+    "jun.",
+    "jul.",
+    "aug.",
+    "sep.",
+    "sept.",
+    "oct.",
+    "nov.",
+    "dec.",
+}
+
+
+def fetch_vocabulary(
+    question: str,
+    years: list[int] | None = None,
+    max_tables: int = 60,
+    max_row_labels: int = 220,
+    max_col_labels: int = 90,
+) -> dict:
+    """Pull actual row/col labels from ledger tables that structurally match
+    the question. Feeds the decompose prompt so the LLM picks labels from a
+    real menu instead of hallucinating vocabulary.
+
+    Fallback cascade if the strict query returns too few tables:
+      0. strict: topic FTS ∩ year filter
+      1. expand year window ±2
+      2. drop topic filter, keep year filter
+      3. drop year filter, keep topic filter
+
+    Labels are deduped, sorted by frequency (most common first), and
+    capped. Pure month names, pure years, and very short strings are
+    filtered out since they're not semantic row labels.
+    """
+    conn = _conn()
+    tokens = _tokens(question)
+    fts_q = _fts_match(tokens)
+
+    def _tables_matching(ft_query: str, year_list: list[int] | None) -> list[int]:
+        if not ft_query:
+            return []
+        year_sql = ""
+        params: list = [ft_query]
+        if year_list:
+            yph = ",".join("?" * len(year_list))
+            year_sql = f"""
+                AND t.id IN (
+                    SELECT table_id FROM table_columns WHERE year_extracted IN ({yph})
+                    UNION
+                    SELECT table_id FROM table_rows WHERE year_extracted IN ({yph})
+                )
+            """
+            params.extend(year_list)
+            params.extend(year_list)
+        params.append(max_tables * 3)
+        sql = f"""
+            SELECT t.id, bm25(tables_fts, 2.0, 1.5, 1.5, 2.0, 2.5) AS score
+            FROM tables_fts
+            JOIN tables t ON t.id = tables_fts.rowid
+            WHERE tables_fts MATCH ?
+              AND t.table_kind = 'data'
+              {year_sql}
+            ORDER BY score
+            LIMIT ?
+        """
+        return [r[0] for r in conn.execute(sql, params).fetchall()]
+
+    # Metric-slug channel: find tables whose row-label slugs match the
+    # question. Two sub-channels:
+    #
+    #   (a) LIKE prefilter + rapidfuzz ranking — fast, precision-biased.
+    #       Catches slugs that literally contain one of the question tokens.
+    #
+    #   (b) Full-vocab rapidfuzz fallback — recall-biased. When (a) is thin
+    #       or the gold slug is short ("interest") and gets drowned in
+    #       substring noise, process.extract over the entire 121K slug
+    #       vocabulary surfaces the closest matches regardless of token
+    #       overlap. Only feasible because rapidfuzz is ~50× faster than
+    #       difflib — the full pass is ~20ms.
+    slug_table_ids: list[int] = []
+    if tokens:
+        q_joined = " ".join(tokens)
+
+        # (a) LIKE prefilter + rapidfuzz ranking
+        like_clauses = " OR ".join(["metric_slug LIKE ?"] * len(tokens))
+        patterns = [f"%{t}%" for t in tokens]
+        sql = f"""
+            SELECT table_id, metric_slug FROM row_label_lookup
+            WHERE {like_clauses}
+            LIMIT ?
+        """
+        matched = conn.execute(sql, (*patterns, max_tables * 10)).fetchall()
+        per_table_best: dict[int, float] = {}
+        for r in matched:
+            score = fuzz.token_set_ratio(q_joined, r["metric_slug"] or "")
+            tid = r["table_id"]
+            if score > per_table_best.get(tid, -1.0):
+                per_table_best[tid] = score
+        sorted(per_table_best.items(), key=lambda kv: -kv[1])
+
+        # (b) Full-vocab rapidfuzz fallback. Always run — cheap, and it
+        # catches the short-slug cases where LIKE drowns in noise.
+        vocab, slug_to_tables = _load_slug_vocab()
+        # process.extract with WRatio combines multiple scorers and is
+        # robust to token order + length differences. score_cutoff=65
+        # excludes weak matches; limit=40 keeps the result set tight.
+        fuzzy_hits = process.extract(
+            q_joined,
+            vocab,
+            scorer=fuzz.WRatio,
+            limit=40,
+            score_cutoff=65,
+        )
+        # Map each matched slug to its tables. Keep best score per table.
+        for slug, score, _idx in fuzzy_hits:
+            for tid in slug_to_tables.get(slug, ()):
+                if score > per_table_best.get(tid, -1.0):
+                    per_table_best[tid] = score
+
+        # Re-rank combined set by score.
+        combined_ranked = sorted(per_table_best.items(), key=lambda kv: -kv[1])
+        slug_table_ids = [tid for tid, _s in combined_ranked][: max_tables * 2]
+
+        # Year filter: promote tables that actually have the target year.
+        if years and slug_table_ids:
+            yph = ",".join("?" * len(years))
+            ph2 = ",".join("?" * len(slug_table_ids))
+            year_filtered = {
+                r[0]
+                for r in conn.execute(
+                    f"""SELECT DISTINCT t.id FROM tables t
+                        WHERE t.id IN ({ph2})
+                          AND t.id IN (
+                            SELECT table_id FROM table_columns WHERE year_extracted IN ({yph})
+                            UNION
+                            SELECT table_id FROM table_rows WHERE year_extracted IN ({yph})
+                          )""",
+                    (*slug_table_ids, *years, *years),
+                ).fetchall()
+            }
+            slug_table_ids = [t for t in slug_table_ids if t in year_filtered] + [
+                t for t in slug_table_ids if t not in year_filtered
+            ]
+        slug_table_ids = slug_table_ids[:max_tables]
+
+    # Stage 0: strict (topic + exact year)
+    topic_year = _tables_matching(fts_q, years) if (fts_q and years) else []
+
+    # ALWAYS union in shape-only results (year filter, no topic). FTS on the
+    # question text is a weak signal — common questions like "what was net
+    # interest in 1980" don't have strong topical keywords, so FTS surfaces
+    # tangentially-related tables while missing the obvious Budget Outlays
+    # table. Year-only recall catches those misses. The cost is more noise
+    # in the menu, which the LLM can filter through selection.
+    shape_only: list[int] = []
+    if years:
+        yph = ",".join("?" * len(years))
+        sql = f"""
+            SELECT DISTINCT t.id, t.file_year FROM tables t
+            WHERE t.table_kind = 'data'
+              AND t.id IN (
+                SELECT table_id FROM table_columns WHERE year_extracted IN ({yph})
+                UNION
+                SELECT table_id FROM table_rows WHERE year_extracted IN ({yph})
+              )
+            ORDER BY ABS(COALESCE(t.file_year, 9999) - ?)
+            LIMIT ?
+        """
+        anchor_year = years[0]
+        shape_only = [
+            r[0] for r in conn.execute(sql, (*years, *years, anchor_year, max_tables)).fetchall()
+        ]
+
+    # Merge three channels: slug-matched first (most row-specific signal),
+    # then topic-FTS, then shape-only fill-in. First occurrence wins on
+    # dedup, so slug-ranked tables keep their relative ordering.
+    seen: set[int] = set()
+    table_ids: list[int] = []
+    for tid in slug_table_ids + topic_year + shape_only:
+        if tid not in seen:
+            seen.add(tid)
+            table_ids.append(tid)
+    fallback = 0 if (slug_table_ids or topic_year) else 2
+
+    # Stage 1: expand year window ±2 if still thin
+    if len(table_ids) < 10 and fts_q and years:
+        expanded = sorted({y + d for y in years for d in (-2, -1, 0, 1, 2)})
+        table_ids = _tables_matching(fts_q, expanded)
+        fallback = 1
+
+    # Stage 2: drop topic filter entirely, keep year
+    if len(table_ids) < 10 and years:
+        yph = ",".join("?" * len(years))
+        sql = f"""
+            SELECT DISTINCT t.id FROM tables t
+            WHERE t.table_kind = 'data'
+              AND t.id IN (
+                SELECT table_id FROM table_columns WHERE year_extracted IN ({yph})
+                UNION
+                SELECT table_id FROM table_rows WHERE year_extracted IN ({yph})
+              )
+            LIMIT ?
+        """
+        fallback_ids = [
+            r[0] for r in conn.execute(sql, (*years, *years, max_tables * 3)).fetchall()
+        ]
+        if len(fallback_ids) > len(table_ids):
+            table_ids = fallback_ids
+            fallback = 2
+
+    # Stage 3: topic only, no year
+    if len(table_ids) < 10 and fts_q:
+        topic_only = _tables_matching(fts_q, None)
+        if len(topic_only) > len(table_ids):
+            table_ids = topic_only
+            fallback = 3
+
+    if not table_ids:
+        return {
+            "row_labels": [],
+            "col_labels": [],
+            "n_tables": 0,
+            "fallback_level": fallback,
+        }
+
+    table_ids = table_ids[:max_tables]
+    ph = ",".join("?" * len(table_ids))
+
+    # Row labels (frequency-counted, filtered).
+    # Exclude time-axis cells: rows where year or month is tagged are the
+    # (year, month) coordinates that questions select *by*, not category
+    # labels they ask *for*. Category rows like "National defense" or
+    # "Interest" have year/month null because they span the whole time axis.
+    row_freq: dict[str, int] = {}
+    for r in conn.execute(
+        f"""SELECT row_leaf, COUNT(*) AS n
+              FROM table_rows
+             WHERE table_id IN ({ph})
+               AND row_leaf IS NOT NULL
+               AND LENGTH(row_leaf) > 2
+               AND is_section_header = 0
+               AND year_extracted IS NULL
+               AND month_extracted IS NULL
+             GROUP BY row_leaf""",
+        table_ids,
+    ):
+        leaf = r[0].strip()
+        leaf_lc = leaf.lower().strip(".,: ")
+        if leaf_lc in _MONTH_NAMES:
+            continue
+        if leaf_lc.isdigit() and len(leaf_lc) == 4:  # pure year
+            continue
+        row_freq[leaf] = row_freq.get(leaf, 0) + r[1]
+
+    # Column labels (same treatment, different cap)
+    col_freq: dict[str, int] = {}
+    for r in conn.execute(
+        f"""SELECT col_leaf, COUNT(*) AS n
+              FROM table_columns
+             WHERE table_id IN ({ph})
+               AND col_leaf IS NOT NULL
+               AND LENGTH(col_leaf) > 2
+             GROUP BY col_leaf""",
+        table_ids,
+    ):
+        col_freq[r[0].strip()] = col_freq.get(r[0].strip(), 0) + r[1]
+
+    row_labels = [lbl for lbl, _n in sorted(row_freq.items(), key=lambda x: -x[1])][:max_row_labels]
+    col_labels = [lbl for lbl, _n in sorted(col_freq.items(), key=lambda x: -x[1])][:max_col_labels]
+
+    return {
+        "row_labels": row_labels,
+        "col_labels": col_labels,
+        "n_tables": len(table_ids),
+        "fallback_level": fallback,
+    }
 
 
 def describe_table(table_id: int, max_labels: int = 60) -> dict:
@@ -802,7 +1140,54 @@ def _cell_name(cell: dict, fallback: str) -> str:
     return fallback
 
 
-def resolve_cells(table_id: int, cells: list[dict], expression: str = "") -> dict:
+_CANONICAL_LOOKUP_SQL = """
+WITH committed AS (
+  SELECT
+    t.signature, t.file_year AS cm_file_year, t.file_month AS cm_file_month,
+    r.row_path, col.col_path,
+    COALESCE(col.year_extracted, r.year_extracted, t.file_year) AS data_year
+  FROM cells c
+  JOIN tables t          ON c.table_id = t.id
+  JOIN table_rows r      ON c.row_id   = r.id
+  JOIN table_columns col ON c.col_id   = col.id
+  WHERE c.table_id = ? AND c.row_id = ? AND c.col_id = ?
+)
+SELECT
+  t.id AS canon_table_id, t.file AS canon_file,
+  t.file_year AS canon_file_year, t.file_month AS canon_file_month,
+  c.raw_value AS canon_raw, c.numeric_value AS canon_numeric,
+  c.parse_status AS canon_parse,
+  cm.cm_file_year, cm.cm_file_month
+FROM committed cm
+JOIN tables t          ON t.signature = cm.signature
+                      AND t.parse_ok = 1
+                      AND t.table_kind = 'data'
+JOIN table_rows r      ON r.table_id = t.id AND r.row_path = cm.row_path
+JOIN table_columns col ON col.table_id = t.id AND col.col_path = cm.col_path
+JOIN cells c           ON c.table_id = t.id AND c.row_id = r.id AND c.col_id = col.id
+WHERE c.parse_status IN ('ok', 'missing')
+  AND COALESCE(col.year_extracted, r.year_extracted, t.file_year) = cm.data_year
+ORDER BY t.file_year DESC, t.file_month DESC
+LIMIT 1
+"""
+
+
+def _canonical_cell(
+    conn: sqlite3.Connection, table_id: int, row_id: int, col_id: int
+) -> sqlite3.Row | None:
+    """Return the latest-published cell for the same (signature, row_path,
+    col_path, data_year) tuple as the given committed cell. Returns None
+    if there is no canonical match or only the committed cell itself.
+    """
+    return conn.execute(_CANONICAL_LOOKUP_SQL, (table_id, row_id, col_id)).fetchone()
+
+
+def resolve_cells(
+    table_id: int,
+    cells: list[dict],
+    expression: str = "",
+    vintage: str = "latest",
+) -> dict:
     """Look up the numeric value of each committed cell.
 
     All cells come from the single `table_id`. If the LLM's cell names
@@ -813,6 +1198,11 @@ def resolve_cells(table_id: int, cells: list[dict], expression: str = "") -> dic
     Returns `{values: {name: v_or_None}, debug: {name: info}}`. Uses
     correct foreign keys: `cells.row_id` → `table_rows.id`,
     `cells.col_id` → `table_columns.id`.
+
+    After fetching the committed cell we consult canonical_facts to see
+    if a newer bulletin publishes a revised value for the same
+    (signature, row_path, col_path, data_year) tuple; when it does, the
+    newer value wins and the supersession is recorded in debug.
     """
     conn = _conn()
     values: dict[str, float | None] = {}
@@ -861,15 +1251,359 @@ def resolve_cells(table_id: int, cells: list[dict], expression: str = "") -> dic
             debug[name] = {"status": "cell_missing", "row_id": row["id"], "col_id": col["id"]}
             continue
 
-        values[name] = cell["numeric_value"]
-        debug[name] = {
-            "status": "ok",
-            "raw": cell["raw_value"],
-            "num": cell["numeric_value"],
-            "parse": cell["parse_status"],
-        }
+        committed_value = cell["numeric_value"]
+        committed_raw = cell["raw_value"]
+        committed_parse = cell["parse_status"]
+
+        canon = _canonical_cell(conn, tid, row["id"], col["id"]) if vintage == "latest" else None
+        use_canon = False
+        if canon is not None:
+            cm_y = canon["cm_file_year"] or 0
+            cm_m = canon["cm_file_month"] or 0
+            c_y = canon["canon_file_year"] or 0
+            c_m = canon["canon_file_month"] or 0
+            if (c_y, c_m) > (cm_y, cm_m):
+                use_canon = True
+
+        if use_canon and canon is not None:
+            values[name] = canon["canon_numeric"]
+            debug[name] = {
+                "status": "ok",
+                "raw": canon["canon_raw"],
+                "num": canon["canon_numeric"],
+                "parse": canon["canon_parse"],
+                "superseded": True,
+                "committed_value": committed_value,
+                "canonical_file": canon["canon_file"],
+                "canonical_table_id": canon["canon_table_id"],
+            }
+        else:
+            values[name] = committed_value
+            debug[name] = {
+                "status": "ok",
+                "raw": committed_raw,
+                "num": committed_value,
+                "parse": committed_parse,
+            }
 
     return {"values": values, "debug": debug}
+
+
+def _build_retrieval_entry(table_id: int) -> dict | None:
+    """Fetch all fields needed by extract_structured() for a given table_id.
+
+    Returns a dict in the same shape as retrieve_v2 entries so it can be
+    used as a drop-in replacement in per_dr_entries.
+    """
+    conn = _conn()
+
+    row = conn.execute(
+        """SELECT file, element_id, element_seq, page_id,
+                  file_year, file_month, section, title, caption,
+                  unit, period, n_rows, n_cols, raw_html
+             FROM tables WHERE id = ? AND parse_ok = 1""",
+        (table_id,),
+    ).fetchone()
+    if not row:
+        return None
+
+    # Distinct years covered by this table (columns first, then rows)
+    years: list[int] = []
+    seen: set[int] = set()
+    for (y,) in conn.execute(
+        "SELECT DISTINCT year_extracted FROM table_columns WHERE table_id=? AND year_extracted IS NOT NULL ORDER BY year_extracted",
+        (table_id,),
+    ):
+        if y not in seen:
+            seen.add(y)
+            years.append(y)
+    for (y,) in conn.execute(
+        "SELECT DISTINCT year_extracted FROM table_rows WHERE table_id=? AND year_extracted IS NOT NULL ORDER BY year_extracted",
+        (table_id,),
+    ):
+        if y not in seen:
+            seen.add(y)
+            years.append(y)
+
+    col_headers = [
+        r[0]
+        for r in conn.execute(
+            "SELECT col_leaf FROM table_columns WHERE table_id=? ORDER BY col_index",
+            (table_id,),
+        )
+    ]
+    row_labels = [
+        r[0]
+        for r in conn.execute(
+            "SELECT row_leaf FROM table_rows WHERE table_id=? AND is_section_header=0 ORDER BY row_index",
+            (table_id,),
+        )
+    ]
+
+    return {
+        "file": row["file"],
+        "element_id": row["element_id"],
+        "element_seq": row["element_seq"],
+        "page_id": row["page_id"],
+        "file_year": row["file_year"],
+        "file_month": row["file_month"],
+        "section": row["section"],
+        "title": row["title"],
+        "caption": row["caption"],
+        "unit": row["unit"],
+        "period": row["period"],
+        "n_rows": row["n_rows"],
+        "n_cols": row["n_cols"],
+        "html": row["raw_html"],
+        "years": sorted(years),
+        "column_headers": col_headers,
+        "row_labels": row_labels,
+        "retrieval_channel": "bottomup",
+        "retrieval_strategy": "bottomup",
+        "probe_matched_rows": [],
+        "probe_best_cells": [],
+    }
+
+
+def retrieve_bottomup(
+    spec: dict,
+    question: str,
+    top_k: int = 5,
+) -> dict[str, list[dict]]:
+    """Bottom-up retrieval: replaces retrieve_v2 as the primary retrieval step.
+
+    For each DR in spec, calls search_cells_bottomup() to find candidate cells
+    by (row_hint × col_year × topic), then builds full retrieval entries from
+    the matching table_ids. Returns {dr_id: [entries]} in the same shape as
+    retrieve_v2 so extract_structured() needs no changes.
+
+    Callers should fall back to retrieve_v2 for any DR that comes back empty.
+    """
+    per_dr: dict[str, list[dict]] = {}
+    data_requests = spec.get("data_requests") or []
+
+    for dr in data_requests:
+        dr_id = dr.get("id", "?")
+        row_hint = dr.get("row_hint", "")
+        if not row_hint:
+            per_dr[dr_id] = []
+            continue
+
+        years = dr.get("years") or []
+        col_year = years[0] if years else None
+        label = dr.get("label", "")
+        topic = " ".join(filter(None, [label, row_hint, question[:80]]))
+
+        hits = search_cells_bottomup(
+            row_hint=row_hint,
+            col_year=col_year,
+            topic=topic,
+            limit=top_k,
+        )
+
+        entries: list[dict] = []
+        seen_tids: set[int] = set()
+        for hit in hits:
+            tid = hit["table_id"]
+            if tid in seen_tids:
+                continue
+            seen_tids.add(tid)
+            entry = _build_retrieval_entry(tid)
+            if entry:
+                entries.append(entry)
+
+        per_dr[dr_id] = entries
+
+    return per_dr
+
+
+def search_cells_bottomup(
+    row_hint: str,
+    col_year: int | None = None,
+    topic: str = "",
+    limit: int = 10,
+) -> list[dict]:
+    """Bottom-up cell search: find cells by row label × column year, grouped by
+    table_signature, returning one result per structural table ordered by
+    (file_year DESC, file_month DESC) — so the latest-published bulletin wins.
+
+    Row matching uses the in-memory slug vocab + rapidfuzz (cached, ~15MB) so
+    all SQL lookups are exact indexed joins — no LIKE scans.
+
+    Column year is matched against col.year_extracted (indexed) first; if that
+    returns nothing, falls back to col.col_path LIKE '%year%' (handles historical
+    columns like "1929" where year_extracted wasn't parsed during ingest).
+    """
+    conn = _conn()
+
+    # ── Step 1: fuzzy-match row_hint against the full slug vocabulary ──────
+    # _load_slug_vocab() is cached after first call (~2-3s). Subsequent calls
+    # are free. We use token_set_ratio so "National defense" matches
+    # "budget national defense", "national defense and veterans", etc.
+    # Slugs in the vocab use spaces ("budget national defense"), so match
+    # with spaces — NOT underscores — for token_set_ratio to work correctly.
+    hint_lower = row_hint.lower().strip()
+    vocab, slug_to_tables = _load_slug_vocab()
+
+    fuzzy_matches = process.extract(
+        hint_lower,
+        vocab,
+        scorer=fuzz.token_set_ratio,
+        limit=100,
+        score_cutoff=60,
+    )
+    matched_slugs = [m[0] for m in fuzzy_matches]
+
+    if not matched_slugs:
+        return []
+
+    # ── Step 2: get candidate table_ids from row_label_lookup (indexed) ───
+    slug_ph = ",".join("?" * len(matched_slugs))
+    candidate_tids: list[int] = []
+    seen_tid: set[int] = set()
+    for (tid,) in conn.execute(
+        f"SELECT DISTINCT table_id FROM row_label_lookup WHERE metric_slug IN ({slug_ph})",
+        matched_slugs,
+    ):
+        if tid not in seen_tid:
+            seen_tid.add(tid)
+            candidate_tids.append(tid)
+
+    if not candidate_tids:
+        return []
+
+    # Cap before year filter to stay under SQLite's 999-variable limit.
+    # (year filter does IN(tids) twice = 2× variables; 490×2 = 980 < 999)
+    candidate_tids = candidate_tids[:490]
+
+    # ── Step 3: filter by col_year (columns OR rows, same as find_tables) ──
+    if col_year is not None:
+        year_str = str(col_year)
+        tid_ph = ",".join("?" * len(candidate_tids))
+        year_tids: set[int] = set()
+        # Check year_extracted in BOTH columns and rows (indexed)
+        for (tid,) in conn.execute(
+            f"""SELECT DISTINCT table_id FROM table_columns
+                WHERE table_id IN ({tid_ph}) AND year_extracted = ?
+                UNION
+                SELECT DISTINCT table_id FROM table_rows
+                WHERE table_id IN ({tid_ph}) AND year_extracted = ?""",
+            (*candidate_tids, col_year, *candidate_tids, col_year),
+        ):
+            year_tids.add(tid)
+        # Fallback: year as text in col_path (handles unindexed historical cols)
+        if not year_tids:
+            for (tid,) in conn.execute(
+                f"SELECT DISTINCT table_id FROM table_columns WHERE table_id IN ({tid_ph}) AND col_path LIKE ?",
+                (*candidate_tids, f"%{year_str}%"),
+            ):
+                year_tids.add(tid)
+        candidate_tids = [t for t in candidate_tids if t in year_tids]
+
+    if not candidate_tids:
+        return []
+
+    # ── Step 4: optional FTS topic filter ─────────────────────────────────
+    if topic.strip():
+        tokens = _tokens(topic)
+        fts_q = _fts_match(tokens)
+        if fts_q:
+            fts_tids: set[int] = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT rowid FROM tables_fts WHERE tables_fts MATCH ?", (fts_q,)
+                )
+            }
+            candidate_tids = [t for t in candidate_tids if t in fts_tids]
+
+    if not candidate_tids:
+        return []
+
+    # ── Step 5: fetch cells for surviving table_ids, order by file_year DESC
+    tid_ph = ",".join("?" * len(candidate_tids))
+    slug_ph = ",".join("?" * len(matched_slugs))
+
+    year_sql = ""
+    year_params: list = []
+    if col_year is not None:
+        year_sql = "AND (col.year_extracted = ? OR col.col_path LIKE ?)"
+        year_params = [col_year, f"%{col_year}%"]
+
+    sql = f"""
+        SELECT
+            t.id          AS table_id,
+            t.file,
+            t.file_year,
+            t.file_month,
+            t.title,
+            t.section,
+            t.caption,
+            t.unit,
+            t.period,
+            t.signature,
+            r.row_path,
+            r.row_leaf,
+            r.metric_slug,
+            col.col_path,
+            col.col_leaf,
+            col.year_extracted  AS col_year_extracted,
+            c.raw_value,
+            c.numeric_value,
+            c.parse_status,
+            COALESCE(col.year_extracted, r.year_extracted, t.file_year) AS data_year
+        FROM cells c
+        JOIN tables        t   ON c.table_id = t.id
+        JOIN table_rows    r   ON c.row_id   = r.id
+        JOIN table_columns col ON c.col_id   = col.id
+        WHERE t.id IN ({tid_ph})
+          AND r.metric_slug IN ({slug_ph})
+          AND t.parse_ok = 1
+          AND t.table_kind = 'data'
+          AND c.parse_status = 'ok'
+          AND c.numeric_value IS NOT NULL
+          {year_sql}
+        ORDER BY t.file_year DESC, t.file_month DESC
+        LIMIT ?
+    """
+
+    fetch_limit = limit * 8
+    params = [*candidate_tids, *matched_slugs, *year_params, fetch_limit]
+    raw = conn.execute(sql, params).fetchall()
+
+    # One result per structural table (signature), already ordered latest-first.
+    seen: set[str] = set()
+    results: list[dict] = []
+    for row in raw:
+        sig = row["signature"] or row["file"]
+        if sig in seen:
+            continue
+        seen.add(sig)
+        results.append(
+            {
+                "table_id": row["table_id"],
+                "file": row["file"],
+                "file_year": row["file_year"],
+                "file_month": row["file_month"],
+                "title": row["title"],
+                "section": row["section"],
+                "caption": row["caption"],
+                "unit": row["unit"],
+                "period": row["period"],
+                "row_path": row["row_path"],
+                "row_leaf": row["row_leaf"],
+                "metric_slug": row["metric_slug"],
+                "col_path": row["col_path"],
+                "col_leaf": row["col_leaf"],
+                "col_year_extracted": row["col_year_extracted"],
+                "raw_value": row["raw_value"],
+                "numeric_value": row["numeric_value"],
+                "data_year": row["data_year"],
+            }
+        )
+        if len(results) >= limit:
+            break
+
+    return results
 
 
 def eval_expression(expression: str, values: dict) -> float:
@@ -938,6 +1672,11 @@ def _cli() -> None:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--describe", type=int, help="describe a table_id")
     ap.add_argument("--solve", action="store_true", help="run LLM tool loop on query")
+    ap.add_argument(
+        "--bottomup", action="store_true", help="bottom-up cell search by row_hint x col_year"
+    )
+    ap.add_argument("--row-hint", dest="row_hint", default="", help="row label hint for --bottomup")
+    ap.add_argument("--col-year", dest="col_year", type=int, help="column year for --bottomup")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -950,6 +1689,17 @@ def _cli() -> None:
             ap.error("--solve requires a question")
         result = solve(args.query, verbose=args.verbose)
         print(json.dumps(result, indent=2, default=str))
+        return
+
+    if args.bottomup:
+        row_hint = args.row_hint or args.query or ""
+        hits = search_cells_bottomup(
+            row_hint=row_hint,
+            col_year=args.col_year,
+            topic=args.query or "",
+            limit=args.limit,
+        )
+        print(json.dumps(hits, indent=2, default=str))
         return
 
     if not args.query:

@@ -7,14 +7,13 @@ V3: Decompose all 246 questions with critical fixes for:
 4. Period Type Tagging (6 cases)
 """
 
+import concurrent.futures
+import csv
 import json
 import os
+import re
 import sys
 import urllib.request
-import re
-import csv
-import time
-import concurrent.futures
 from threading import Semaphore
 
 API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -24,7 +23,7 @@ semaphore = Semaphore(MAX_CONCURRENT)
 def load_questions():
     """Load all 246 questions from CSV"""
     questions = []
-    with open('data/officeqa_full.csv', 'r') as f:
+    with open('data/officeqa_full.csv') as f:
         for row in csv.DictReader(f):
             questions.append(row)
     return questions
@@ -291,7 +290,7 @@ def main():
     successful = sum(1 for r in results if r and 'result' in r)
     failed = sum(1 for r in results if r and 'error' in r)
 
-    print(f"\nStats:", file=sys.stderr)
+    print("\nStats:", file=sys.stderr)
     print(f"  Successful: {successful}/{len(questions)}", file=sys.stderr)
     print(f"  Failed: {failed}/{len(questions)}", file=sys.stderr)
 

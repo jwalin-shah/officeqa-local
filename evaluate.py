@@ -4,9 +4,11 @@ Evaluate agent performance on OfficeQA benchmark.
 """
 
 import csv
-from pathlib import Path
-from agent import TreasuryAgent
 import sys
+from pathlib import Path
+
+from agent import TreasuryAgent
+
 
 def evaluate_benchmark(limit=None):
     """Run agent on benchmark and report scores."""
@@ -49,7 +51,7 @@ def evaluate_benchmark(limit=None):
 
             if is_correct:
                 correct += 1
-                print(f"  ✓ Correct")
+                print("  ✓ Correct")
             else:
                 print(f"  ✗ Got: {answer[:80]}...")
                 print(f"    Expected: {expected}")
@@ -60,7 +62,7 @@ def evaluate_benchmark(limit=None):
 
     # Report
     accuracy = correct / total * 100
-    print(f"\n📊 Results:")
+    print("\n📊 Results:")
     print(f"  Correct: {correct}/{total}")
     print(f"  Accuracy: {accuracy:.1f}%")
 

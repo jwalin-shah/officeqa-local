@@ -1,44 +1,83 @@
 # OfficeQA Local
 
-Run the OfficeQA benchmark locally without Arena infrastructure.
+Ledger-backed benchmark harness for answering U.S. Treasury Bulletin questions on the 246-question OfficeQA benchmark.
 
-Uses Claude + orchestrator logic to answer U.S. Treasury Bulletin questions.
+The active system is the structured pipeline in `solve.py`, backed by `ledger.sqlite` and `corpus_json/`. The older grep-oriented scripts are still present in the repo, but they are not the architectural center of the project anymore.
+
+## Current Architecture
+
+Active path:
+
+```text
+question
+  -> scout
+  -> decompose
+  -> retrieve
+  -> deterministic fast-path
+  -> extract
+  -> compute
+  -> verify
+  -> answer
+```
+
+Core modules:
+
+- `solve.py` — current orchestrator
+- `retrieve_v2.py` — canonical retrieval path over `ledger.sqlite`
+- `find.py` — deterministic cell lookup / bottom-up search
+- `extract.py` — grounded extraction
+- `compute.py` — deterministic math / formatting
+- `verify.py` — post-compute checks and auto-fixes
+- `build_ledger.py` — ingestion into the ledger
 
 ## Setup
 
 ```bash
-# Copy .env and add your API key
 cp .env.example .env
-
-# Activate venv
 source .venv/bin/activate
 ```
 
-## Usage
+Primary runtime dependencies for full local runs:
 
-### Answer a single question
+- `corpus_json/`
+- `ledger.sqlite`
+- API credentials in `.env`
+
+## Common Commands
+
+Run one question:
 
 ```bash
-python agent.py "What were the total expenditures for U.S national defense in 1940?"
+uv run python solve.py "What were the total expenditures for national defense in 1940?"
 ```
 
-### Evaluate on full benchmark
+Run tests:
 
 ```bash
-python evaluate.py           # All 246 questions
-python evaluate.py 10        # First 10 questions (for testing)
+uv run pytest
 ```
 
-## Files
+Run selected eval flows:
 
-- `agent.py` — Main orchestrator agent
-- `evaluate.py` — Benchmark evaluation script
-- `corpus/` — Treasury Bulletin txt files
-- `officeqa_full.csv` — 246 test Q&A pairs
-- `cpi.py` — CPI calculator utility
+```bash
+uv run python solve.py --eval --n 10
+uv run python solve.py --eval
+uv run python eval_decompose.py
+uv run python extract.py --test-oracle --n 20
+```
 
-## Performance
+## Planning Docs
 
-Target: Beat 75% (previous best with Goose)
+- [Target Architecture](docs/TARGET_ARCHITECTURE.md)
+- [Execution Roadmap](docs/EXECUTION_ROADMAP.md)
+- [Workstreams And Ownership](docs/WORKSTREAMS.md)
+- [Ingestion Integrity And Benchmark Strategy](docs/INGESTION_AND_BENCHMARK_STRATEGY.md)
+- [Lossless Ledger Plan](PLAN.md)
+- [Current Project Architecture / Commands](CLAUDE.md)
 
-Current: Building...
+## Repo Notes
+
+- `archive_from_arena/` is reference material only.
+- `retrieve_v2.py` is the canonical retrieval implementation.
+- `ledger.sqlite` and evaluation artifacts are large; keep a clear distinction between code and generated outputs.
+- The project should first become excellent on OfficeQA before being generalized to other benchmarks.

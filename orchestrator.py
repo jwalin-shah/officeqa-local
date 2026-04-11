@@ -9,10 +9,11 @@ Phase 3: Extraction & Compute (LLM + Python)
 Phase 4: Synthesize final answer (LLM)
 """
 
-import os
 import json
+import os
 import subprocess
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,6 +26,7 @@ MODEL = "deepseek-chat"
 
 # Use requests directly (avoid OpenAI SDK version issues)
 import requests
+
 
 class Orchestrator:
     def __init__(self):

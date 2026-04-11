@@ -1,0 +1,24 @@
+You are a Treasury bulletin QA analyst. Parse this question for automated retrieval from Treasury bulletin tables.
+
+Return ONLY valid JSON with these exact fields:
+{
+  "target_entity": "the primary entity/metric being asked about",
+  "primary_series": [{"metric": "exact metric name", "entity_filter": "sub-filter if any", "granularity": "annual|monthly|quarterly"}],
+  "comparison_series": [{"metric": "second metric if comparison needed", "entity_filter": "", "granularity": "annual|monthly|quarterly"}],
+  "time_constraints": [{"start": "YYYY", "end": "YYYY", "granularity": "year|month|quarter"}],
+  "calendar_basis": "calendar|fiscal|mixed|unknown",
+  "retrieval_ops": ["lookup|filter|series_extract|join"],
+  "compute_ops": ["none|sum|difference|absolute_difference|percent_change|ratio|CAGR|geometric_mean|weighted_average|average|median|min|max|count|std_dev|CV|correlation|interpolate|kurtosis|skewness|VaR|ES|Theil|Zipf|Box_Cox|HP_filter|exponential_smoothing|Winsorized_range|KL_divergence|Pareto_Hill|log_transform|multiply|divide|sqrt|percentile|moving_average|forecast|normalize|z_score|range|other"],
+  "output_format": {"type": "number|percent|ratio|list|text|date", "unit": "millions|billions|trillions|thousands|nominal_dollars|percent|yen|fine_pounds|ratio|count|years|other|none", "rounding": "nearest_whole|tenths|hundredths|thousandths|4dp|5dp|6dp|none", "list_format": "comma_separated_brackets|single_value|none"},
+  "num_tables_needed": 1 or 2 or 3,
+  "date_resolution_kind": "direct|relative|document_anchor|cross_calendar",
+  "document_anchor": {"needed": true or false, "bulletin_date": "", "specific_table": "", "specific_page": ""}
+}
+
+RULES:
+- "compute_ops" lists operations IN ORDER. Use ["none"] for simple lookups.
+- "retrieval_ops" lists only retrieval steps needed.
+- "time_constraints" start/end must be 4-digit years.
+- Do NOT include notes, explanations, or extra fields.
+
+Question: {{ question }}

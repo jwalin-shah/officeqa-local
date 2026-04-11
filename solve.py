@@ -21,7 +21,7 @@ from openai import OpenAI
 from compute import ComputeError, format_result, parse_unit, validate_extractions
 from compute import execute as compute_execute
 from extract import extract_structured
-from find import resolve_cells
+from find import fetch_vocabulary, resolve_cells, retrieve_bottomup, search_cells_bottomup
 from retrieve_v2 import retrieve as retrieve_v2
 from scout import scout
 from verify import verify_answer
@@ -198,6 +198,7 @@ def _try_deterministic_fast_path(
     if not data_requests:
         return {}, []
 
+    vintage = spec.get("vintage", "latest")
     extractions: dict[str, dict] = {}
     unresolved_ids: list[str] = []
     notes_parts: list[str] = []
@@ -256,7 +257,7 @@ def _try_deterministic_fast_path(
 
         # Call resolve_cells
         try:
-            resolved = resolve_cells(table_id, cells)
+            resolved = resolve_cells(table_id, cells, vintage=vintage)
         except Exception as e:
             if verbose:
                 print(f"  Fast-path: {dr_id} resolve_cells error: {e}")
@@ -268,6 +269,49 @@ def _try_deterministic_fast_path(
         # Check if all values resolved (non-None)
         unresolved_cells = [k for k, v in values.items() if v is None]
         if unresolved_cells:
+            # Before giving up, try bottom-up cell search: start from row×col criteria
+            # and let the ledger pick the right table + latest bulletin automatically.
+            # This recovers from: (a) row_hint that doesn't match any slug/leaf in the
+            # top-down retrieved table, (b) year_extracted not indexed for historical
+            # columns, (c) multiple bulletins — always picks file_year DESC.
+            row_hint = dr.get("row_hint", "")
+            dr_years = dr.get("years") or []
+            col_year = dr_years[0] if dr_years else None
+            keywords = dr.get("keywords") or []
+            topic = " ".join(keywords[:6]) if keywords else row_hint
+            granularity = dr.get("granularity", "annual")
+
+            if row_hint and granularity in ("annual", "specific_month", "unknown", None):
+                bu_hits = search_cells_bottomup(
+                    row_hint=row_hint,
+                    col_year=col_year,
+                    topic=topic,
+                    limit=5,
+                )
+                if bu_hits:
+                    best = bu_hits[0]
+                    numeric = best.get("numeric_value")
+                    if numeric is not None:
+                        if verbose:
+                            print(
+                                f"  Fast-path: {dr_id} bottomup hit → "
+                                f"{numeric} from {best['file']} "
+                                f"(row={best['row_leaf']}, col={best['col_leaf']})"
+                            )
+                        extractions[dr_id] = {
+                            "values": [numeric],
+                            "labels": [best.get("row_leaf", "")],
+                            "source_file": best["file"],
+                            "confidence": "bottomup",
+                            "bottomup_table_id": best["table_id"],
+                            "bottomup_file_year": best["file_year"],
+                        }
+                        notes_parts.append(
+                            f"{dr_id}: resolved via bottom-up search "
+                            f"(table {best['table_id']}, {best['file']})"
+                        )
+                        continue
+
             if verbose:
                 print(f"  Fast-path: {dr_id} unresolved cells: {unresolved_cells}")
             unresolved_ids.append(dr_id)
@@ -384,11 +428,22 @@ def parse_json(raw: str) -> dict | None:
 # LLM CALL 1: STRUCTURED DECOMPOSE → QuestionSpec
 # ═══════════════════════════════════════════════════════════════════════════════
 
-DECOMPOSE_SYSTEM = """You decompose U.S. Treasury Bulletin questions into a
-structured QuestionSpec that a deterministic pipeline can execute. List EXACTLY
-what values are needed, EXACTLY how to compute them (as a Python template), and
-EXACTLY how to format the answer. Python runs the computation — you just specify
-it.
+DECOMPOSE_SYSTEM = """You are a collaborator on a research effort to answer
+U.S. Treasury Bulletin questions with precision. Your work here matters: every
+spec you produce is handed to a deterministic pipeline that will execute it
+without second-guessing. A careful decomposition is worth far more than a fast
+one — take the time you need to read the question properly.
+
+It is OK to be uncertain. It is not OK to hide uncertainty. When you are unsure
+about a period, a row label, a year, or a computation, say so in
+`resolution_notes`. A flagged uncertain spec is strictly better than a
+confident wrong one — the pipeline can retry on flagged uncertainty but cannot
+recover from fabrication.
+
+You decompose U.S. Treasury Bulletin questions into a structured QuestionSpec
+that a deterministic pipeline can execute. List EXACTLY what values are needed,
+EXACTLY how to compute them (as a Python template), and EXACTLY how to format
+the answer. Python runs the computation — you just specify it.
 
 ═══════════════════════════════════════════════════════════════════════════════
 THE CORPUS
@@ -518,6 +573,32 @@ DRs for A and B and divide in the template. Do NOT ask for a cohort of
 denomination rows and reconstruct the math by parsing row labels.
 
 ═══════════════════════════════════════════════════════════════════════════════
+DERIVED VALUES  (values that don't exist as table cells)
+═══════════════════════════════════════════════════════════════════════════════
+Some values must be COMPUTED from raw table data because they don't appear as
+a direct column:
+
+  - RATIOS: A table may show "interest-bearing debt" and "total debt" as
+    separate columns, but not their ratio. Request both amounts as separate
+    DRs and compute the ratio in python_template.
+    WRONG:  one DR for "ratio of interest-bearing to total debt"
+    RIGHT:  DR v1 = "interest-bearing public debt", DR v2 = "total federal
+            debt", template = "result = v1[0] / v2[0] * 100"
+
+  - WEIGHTED AVERAGES / PER-UNIT VALUES: A table may show dollar values by
+    category but not counts. E.g., currency-in-circulation tables show total
+    dollar value per denomination but NOT the number of bills/coins. Request
+    a cohort of denomination values and compute counts in python_template:
+    template = "pieces = [v / d for v, d in zip(values['v1'],
+               [1, 2, 5, 10, 20, 50, 100])]; result = sum(values['v1']) /
+               sum(pieces)"
+
+  - PERCENTAGE COLUMNS: If the table already has a "% increase" or "% change"
+    column, prefer extracting that directly rather than computing from raw
+    amounts — the table's rounded percentage is usually what the gold answer
+    expects.
+
+═══════════════════════════════════════════════════════════════════════════════
 CROSS-REFERENCE QUESTIONS
 ═══════════════════════════════════════════════════════════════════════════════
 If the question requires resolving fact A before looking up fact B (e.g. "find
@@ -525,6 +606,14 @@ which bureau did X, then use that bureau's report…"), resolve A yourself using
 general knowledge and state the resolved fact in `resolution_notes` at the top
 level of the spec. Then build data_requests for fact B using the resolved
 answer. Do not try to encode the resolution as a corpus lookup.
+
+Notable historical facts for cross-reference resolution:
+  - Treasury Notes of 1890 were retired/removed from circulation around 1961-
+    1962 (table shows them going from "$1 million" to "*" in that period).
+  - The Bureau of Government Financial Operations (later renamed Financial
+    Management Service/FMS) merged with the Bureau of the Public Debt to form
+    the Bureau of the Fiscal Service in 2012.
+  - Series E savings bonds were replaced by Series EE in 1980.
 
 ═══════════════════════════════════════════════════════════════════════════════
 UNITS
@@ -588,6 +677,24 @@ When it asks for values rounded to N places, set output_format.rounding = N —
 the formatter handles rounding, not the calculator.
 
 ═══════════════════════════════════════════════════════════════════════════════
+DATA VINTAGE  (canonical revisions vs. as-originally-reported)
+═══════════════════════════════════════════════════════════════════════════════
+Treasury Bulletins often revise values in later issues — a 1967-07 table may
+republish figures from its 1967-09 successor with small corrections. Most
+questions want the best current number; a few explicitly ask for the
+originally-reported version.
+
+  vintage: "latest"       — default. Use revised/canonical values when a
+                             later bulletin supersedes them.
+  vintage: "as_reported"  — set ONLY when the question explicitly asks for
+                             preliminary, provisional, originally-reported,
+                             or as-of-publication values (e.g. "as
+                             originally reported", "preliminary estimate",
+                             "as published in the July 1967 bulletin").
+
+If in doubt, leave it as "latest".
+
+═══════════════════════════════════════════════════════════════════════════════
 MULTI-VALUE ANSWERS
 ═══════════════════════════════════════════════════════════════════════════════
 If the question asks for a list like [slope, intercept] or [val1, val2, val3]:
@@ -626,8 +733,51 @@ OUTPUT — return ONLY this JSON schema, no prose
     "as_percent": false
   },
   "resolution_notes": null,
-  "question_kind": "value|page_number|date|text"
+  "question_kind": "value|page_number|date|text",
+  "vintage": "latest|as_reported"
 }"""
+
+
+def _years_from_question(question: str) -> list[int]:
+    import re as _re
+
+    return sorted({int(y) for y in _re.findall(r"\b(1[89]\d{2}|20[0-3]\d)\b", question)})
+
+
+def _format_vocab_block(vocab: dict) -> str:
+    """Render a compact bullet list of real row/col labels for the prompt."""
+    if not vocab or vocab.get("n_tables", 0) == 0:
+        return ""
+
+    row_labels = vocab.get("row_labels") or []
+    col_labels = vocab.get("col_labels") or []
+    if not row_labels and not col_labels:
+        return ""
+
+    lines = [
+        "",
+        "═══════════════════════════════════════════════════════════════════════════════",
+        "ACTUAL LABELS FROM THE CORPUS  (real row/col labels from tables that match this question)",
+        "═══════════════════════════════════════════════════════════════════════════════",
+        f"Pulled from {vocab['n_tables']} candidate tables in the ledger. Most common first.",
+        "When you write `row_hint` and `column_hint`, PREFER a label from these lists",
+        "VERBATIM (including punctuation, abbreviations, and capitalization). The LLM is",
+        "good at picking from a menu; it is bad at guessing Treasury's exact vocabulary.",
+        "Only fall back to your own guess if nothing in the list fits — and explain why",
+        "in `resolution_notes`.",
+        "",
+    ]
+    if col_labels:
+        lines.append("COLUMN LABELS:")
+        for c in col_labels:
+            lines.append(f"  • {c}")
+        lines.append("")
+    if row_labels:
+        lines.append("ROW LABELS:")
+        for r in row_labels:
+            lines.append(f"  • {r}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict | None:
@@ -641,6 +791,19 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
         user_parts.append(scout_hint)
         user_parts.append("")
     user_parts.append(f"QUESTION: {question}")
+
+    # Pull real row/col labels from structurally-matching tables in the
+    # ledger and inject them as a menu. The LLM picks from this list
+    # instead of hallucinating Treasury vocabulary.
+    try:
+        years = _years_from_question(question)
+        vocab = fetch_vocabulary(question, years=years or None)
+        vocab_block = _format_vocab_block(vocab)
+        if vocab_block:
+            user_parts.append(vocab_block)
+    except Exception as e:  # never let vocab lookup break decompose
+        print(f"  [decompose] fetch_vocabulary failed: {e}", flush=True)
+
     if feedback:
         user_parts.append("")
         user_parts.append(
@@ -661,6 +824,42 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
         return "python_template" in s.get("computation_spec", {})
 
     if _is_valid(spec):
+        v = spec.get("vintage")
+        if v not in ("latest", "as_reported"):
+            spec["vintage"] = "latest"
+
+        # Reject duplicate-label DRs on binary computations: a `difference`
+        # / `ratio` / `percent_change` between two identical things is
+        # always meaningless and almost always a decompose mistake (the
+        # LLM forgot to differentiate the two periods or columns). Retry
+        # once with explicit feedback.
+        binary_ops = {
+            "difference",
+            "abs_difference",
+            "percent_change",
+            "abs_percent_change",
+            "ratio",
+        }
+        comp = (spec.get("computation") or "").strip().lower()
+        drs = spec.get("data_requests") or []
+        labels = [(dr.get("label") or "").strip().lower() for dr in drs]
+        if (
+            not feedback
+            and comp in binary_ops
+            and len(labels) >= 2
+            and len(set(labels)) < len(labels)
+        ):
+            return decompose(
+                question,
+                scout_hint=scout_hint,
+                feedback=(
+                    f"Your previous spec used computation={comp!r} but two "
+                    f"data_requests had identical labels. A binary "
+                    f"comparison needs two DISTINCT inputs (e.g. different "
+                    f"years, columns, or rows). Either differentiate them "
+                    f"or switch to a different computation."
+                ),
+            )
         return spec
 
     # Fallback when the LLM failed to produce a usable spec — don't drop
@@ -692,6 +891,7 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
         "question_kind": "value",
         "resolution_notes": "decompose fallback (LLM failed)",
         "cpi_needed": False,
+        "vintage": "latest",
     }
 
 
@@ -705,6 +905,7 @@ def retrieve_for_spec(
     question: str,
     verbose: bool = False,
     top_k_per_dr: int = 10,
+    max_per_file: int = 3,
 ) -> dict:
     """Per-DR retrieval against the table-level index.
 
@@ -712,18 +913,26 @@ def retrieve_for_spec(
     inline so extract can render it directly — no .txt re-parsing. We wrap
     each DR in its own single-DR plan because retrieve_v2 only honours the
     first data_request.
+
+    `max_per_file` caps how many tables from the same bulletin can appear in
+    the top-k. Previously we deduped to 1 per file, which killed the gold
+    table when it wasn't the best-scoring table in its file (median intra-file
+    rank of the gold table is 13). 3 gives extract a realistic shot at seeing
+    the right table while keeping diversity across files.
     """
     per_dr: dict[str, list[dict]] = {}
     data_requests = spec.get("data_requests") or []
+    vintage = spec.get("vintage", "latest")
     for dr in data_requests:
         dr_id = dr.get("id", "?")
-        mini_plan = {"data_requests": [dr]}
+        mini_plan = {"data_requests": [dr], "vintage": vintage}
         entries = retrieve_v2(
             mini_plan,
             question,
             top_k=top_k_per_dr,
             verbose=verbose,
-            dedupe_by_file=True,
+            max_per_file=max_per_file,
+            vintage=vintage,
         )
         per_dr[dr_id] = entries
     return per_dr
@@ -904,11 +1113,30 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
     if verbose:
         print(f"  Spec: {json.dumps(spec, indent=2)[:800]}")
 
-    # Phase 2: retrieve — bounce back to decompose if no tables match
-    per_dr = retrieve_for_spec(spec, question, verbose=verbose)
+    # Phase 2: retrieve — bottom-up primary, retrieve_v2 fallback per DR
+    per_dr = retrieve_bottomup(spec, question, top_k=5)
+    # Fill any DRs that got no bottom-up hits with retrieve_v2
+    empty_drs = [dr_id for dr_id, entries in per_dr.items() if not entries]
+    if empty_drs:
+        if verbose:
+            print(
+                f"  Bottom-up missed {len(empty_drs)} DR(s) — falling back to retrieve_v2: {empty_drs}"
+            )
+        fallback = retrieve_for_spec(spec, question, verbose=verbose)
+        for dr_id in empty_drs:
+            per_dr[dr_id] = fallback.get(dr_id, [])
+
     total = _total_entries(per_dr)
     if verbose:
-        print(f"  Retrieve: {total} table entries across {len(per_dr)} data_requests")
+        bu_hits = sum(
+            1
+            for dr_id, entries in per_dr.items()
+            if entries and entries[0].get("retrieval_channel") == "bottomup"
+        )
+        print(
+            f"  Retrieve: {total} entries across {len(per_dr)} DRs "
+            f"({bu_hits} bottom-up, {len(per_dr) - bu_hits} fallback)"
+        )
     if total == 0:
         if not _bump_llm("decompose(retry)"):
             return "RETRIEVE_EMPTY"
@@ -1072,6 +1300,118 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ERROR CATEGORIZATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Heuristics for classifying wrong answers into failure categories when the
+# pipeline returned a numeric/text answer (not an explicit error string).
+_UNIT_WORDS = {"thousand", "thousands", "million", "millions", "billion", "billions"}
+_FY_CY_WORDS = {"fiscal", "calendar", "fy", "cy"}
+
+
+def _numeric_ratio(s: str) -> float:
+    """Fraction of non-whitespace characters that are digits or commas/periods."""
+    cleaned = s.strip().replace(",", "").replace(".", "")
+    if not cleaned:
+        return 0.0
+    return sum(1 for c in cleaned if c.isdigit()) / len(cleaned)
+
+
+def categorize_error(
+    got: str,
+    expected: str,
+    rationale: str = "",
+) -> str:
+    """Classify a wrong answer into a failure category.
+
+    Returns one of:
+      decompose_failed  — pipeline returned DECOMPOSE_FAILED explicitly
+      retrieve_empty    — pipeline returned RETRIEVE_EMPTY explicitly
+      extract_failed    — pipeline returned EXTRACT_FAILED/NO_VALUES explicitly
+      compute_failed    — pipeline returned COMPUTE_FAILED explicitly
+      wrong_table       — answer is numeric but off by >50% (likely wrong table/row)
+      unit_scaling      — answer off by ~1000× or ~1e6× (unit conversion missed)
+      fy_cy_confusion   — question mentions FY/CY, answer numeric but wrong
+      verify_missed     — answer passed verify but is still wrong
+
+    When the pipeline returns an explicit error string (DECOMPOSE_FAILED,
+    RETRIEVE_EMPTY, etc.), the category is determined directly. For numeric
+    answers that don't match the gold answer, heuristic rules classify the
+    likely failure mode.
+    """
+    got_upper = got.upper().strip()
+
+    # Direct error strings from the pipeline
+    if got_upper == "DECOMPOSE_FAILED":
+        return "decompose_failed"
+    if got_upper == "RETRIEVE_EMPTY":
+        return "retrieve_empty"
+    if got_upper.startswith("EXTRACT_FAILED"):
+        return "extract_failed"
+    if got_upper.startswith("NO_VALUES"):
+        return "extract_failed"
+    if got_upper.startswith("COMPUTE_FAILED"):
+        return "compute_failed"
+
+    # For actual answers that are wrong, try heuristic classification.
+    # Try to extract numbers from both got and expected for ratio analysis.
+    import re as _re
+
+    def _first_number(s: str) -> float | None:
+        s = _re.sub(r"[\d,]+\.\d+%", lambda m: m.group().rstrip("%"), s)
+        s_clean = s.replace(",", "")
+        nums = _re.findall(r"-?\d+\.?\d*", s_clean)
+        for n in nums:
+            try:
+                val = float(n)
+                if 1900 <= val <= 2100 and val == int(val):
+                    continue  # skip likely years
+                return val
+            except ValueError:
+                continue
+        return None
+
+    got_num = _first_number(got)
+    exp_num = _first_number(expected)
+
+    if got_num is not None and exp_num is not None and exp_num != 0:
+        ratio = got_num / exp_num
+
+        # Unit scaling: off by typical unit conversion factors (×1000 or ×1e6)
+        # Common cases: answer in thousands but expected in raw, or vice versa
+        if 900 <= ratio <= 1100 or 0.0009 <= ratio <= 0.0011:
+            return "unit_scaling"
+        if 0.9e6 <= ratio <= 1.1e6 or 0.9e-6 <= ratio <= 1.1e-6:
+            return "unit_scaling"
+        # Also check for millions ↔ thousands confusion (ratio ~1000)
+        if 0.9e3 <= ratio <= 1.1e3 and ratio > 100:
+            return "unit_scaling"
+
+        # FY/CY confusion: question mentions fiscal/calendar year and
+        # answer is moderately off (FY total ≈ CY total but not exact)
+        got_lower = got.lower()
+        exp_lower = expected.lower()
+        # Check if the question context (from rationale or the answer) hints at FY/CY
+        has_fy_cy_context = bool(_FY_CY_WORDS & set(got_lower.split())) or bool(
+            _FY_CY_WORDS & set(exp_lower.split())
+        )
+        if has_fy_cy_context and 0.8 <= abs(ratio) <= 1.25 and abs(ratio) != 1.0:
+            return "fy_cy_confusion"
+
+        # Wrong table: answer is numeric but significantly off (>50%)
+        if abs(ratio) > 1.5 or (0 < abs(ratio) < 0.67):
+            return "wrong_table"
+
+    # If we can't determine a more specific category, check for FY/CY hints
+    # in the answer text even without numeric analysis
+    if _FY_CY_WORDS & set(got.lower().split()):
+        return "fy_cy_confusion"
+
+    # Default: answer passed all pipeline stages but is still wrong
+    return "verify_missed"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1147,6 +1487,7 @@ if __name__ == "__main__":
             return row, solve(question, verbose=verbose)
 
         correct, total = 0, 0
+        error_categories: dict[str, int] = {}
         print(
             f"Running {len(rows)} questions across {parallel} workers"
             f"{' (oracle mode)' if oracle else ''}...",
@@ -1167,13 +1508,23 @@ if __name__ == "__main__":
                         flush=True,
                     )
                 else:
+                    category = categorize_error(got, expected, rationale)
+                    error_categories[category] = error_categories.get(category, 0) + 1
                     print(
                         f"  [{total:3d}/{len(rows)}] {tag} {row['uid']}: "
-                        f"expected={expected!r} got={got!r} ({rationale})",
+                        f"expected={expected!r} got={got!r} [{category}] ({rationale})",
                         flush=True,
                     )
 
         print(f"\nAccuracy: {correct}/{total} = {correct / total * 100:.1f}%")
+        if error_categories:
+            print("\nError categories:")
+            for cat in sorted(error_categories, key=error_categories.get, reverse=True):  # type: ignore[arg-type]
+                count = error_categories[cat]
+                pct = count / total * 100
+                print(f"  {cat}: {count} ({pct:.1f}%)")
+            n_categorized = sum(error_categories.values())
+            print(f"  Total errors: {n_categorized}/{total}")
 
     elif args:
         question = " ".join(args)

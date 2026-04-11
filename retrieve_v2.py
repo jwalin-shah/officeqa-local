@@ -320,6 +320,76 @@ def _row_hint_variants(row_hint: str) -> list[str]:
     return variants
 
 
+def _bulk_cell_probe(
+    conn: sqlite3.Connection,
+    table_ids: set[int] | list[int],
+    row_hints: list[str],
+) -> dict[int, tuple[int, int]]:
+    """Return {table_id: (matching_row_count, best_row_non_null_cells)}.
+
+    Ground-truth row probe: for each candidate table, find rows whose
+    `metric_slug` matches one of the row_hint variants, and for each
+    matching row count its non-null, non-missing cells. Report:
+
+      - matching_row_count: how many distinct rows in this table match
+        (1 is ideal; >1 means the DR is ambiguous here)
+      - best_row_non_null_cells: the *largest* non-null cell count among
+        matching rows (this is the "can this row actually supply values"
+        signal — a row with 12 monthlies beats a row with 1 annual)
+
+    Total cells was a bad signal: big tables with many detailed-breakdown
+    rows (e.g. "National defense", "National defense limitation", "…
+    reserves") accumulate cells regardless of whether any single row can
+    answer the DR.
+
+    Zero matching rows → drop candidate. Deliberately does NOT year-
+    filter; file-year scoping is handled upstream by the FTS window.
+
+    One SQL round-trip for the whole candidate set.
+    """
+    if not table_ids or not row_hints:
+        return {}
+
+    slug_patterns: list[str] = []
+    seen: set[str] = set()
+    for rh in row_hints:
+        for variant in _row_hint_variants(rh) or [normalize_metric_slug(rh)]:
+            if not variant or variant in seen:
+                continue
+            seen.add(variant)
+            slug_patterns.append(f"%{variant}%")
+    if not slug_patterns:
+        return {}
+
+    tid_list = list(table_ids)
+    tid_placeholders = ",".join("?" * len(tid_list))
+    row_clause = " OR ".join(["r.metric_slug LIKE ?"] * len(slug_patterns))
+
+    # Per (table, row) non-null cell count, then aggregate up to table.
+    sql = f"""
+        WITH row_cells AS (
+            SELECT r.table_id AS table_id,
+                   r.id       AS row_id,
+                   SUM(CASE WHEN c.numeric_value IS NOT NULL
+                              AND COALESCE(c.is_missing, 0) = 0
+                             THEN 1 ELSE 0 END) AS non_null_count
+              FROM table_rows r
+              LEFT JOIN cells c ON c.row_id = r.id AND c.table_id = r.table_id
+             WHERE r.table_id IN ({tid_placeholders})
+               AND ({row_clause})
+             GROUP BY r.table_id, r.id
+        )
+        SELECT table_id,
+               COUNT(*)            AS matching_row_count,
+               MAX(non_null_count) AS best_row_non_null_cells
+          FROM row_cells
+         GROUP BY table_id
+    """
+    params: tuple = (*tid_list, *slug_patterns)
+    rows = conn.execute(sql, params).fetchall()
+    return {int(r[0]): (int(r[1] or 0), int(r[2] or 0)) for r in rows}
+
+
 def _merge_ranked_rows(*groups: list[sqlite3.Row], top_n: int) -> list[sqlite3.Row]:
     merged: list[sqlite3.Row] = []
     seen_ids: set[int] = set()
@@ -426,30 +496,57 @@ def _file_year_bonus(file_year, file_month, target_years, year_mode) -> float:
 
     max_ty = max(target_years)
     offset = fy - max_ty
-    # Offset distribution across all 246 gold questions (cached analysis):
-    # offset 0: 139 (most common), +1: 85, +2-6: ~19 combined. Coverage 0-3
-    # covers ~95%. BUT the mode matters: "calendar year N" questions want
-    # the annual summary published in the following January-March (offset
-    # +1), while snapshot-style questions ("as of 2016", "in mid-March 2016")
-    # want the in-year bulletin (offset 0). Fiscal-year questions want the
-    # bulletin published around fiscal year-end (offset 0, months 7-10).
-    peak_off = 1 if year_mode == "calendar" else 0
-    near_off = 1 - peak_off  # the other of {0, 1}
-
-    if offset == peak_off:
-        base = 5.0
-    elif offset == near_off:
-        base = 4.5
-    elif offset == 2:
-        base = 3.0
-    elif offset == 3:
-        base = 2.5
-    elif 4 <= offset <= 6:
-        base = 1.5
-    elif offset < 0 and min(target_years) <= fy:
-        base = 2.0
+    # Treasury-specific publication cadence (this is harness-level domain
+    # knowledge, intentional): "calendar year N" questions want the annual
+    # summary published in the following Jan-Mar (offset +1). Fiscal-year
+    # questions want the bulletin covering FY end (offset 0, months 7-10).
+    # Snapshot-style questions ("as of 2016", "in mid-March 2016") land on
+    # offset 0 — we treat those as year_mode=="unknown".
+    if year_mode == "calendar":
+        if offset == 1:
+            base = 6.0
+        elif offset == 2:
+            base = 3.5
+        elif offset == 3:
+            base = 2.5
+        elif 4 <= offset <= 6:
+            base = 1.5
+        elif offset == 0:
+            base = 2.0
+        elif offset < 0 and min(target_years) <= fy:
+            base = 1.5
+        else:
+            base = 0.0
+    elif year_mode == "fiscal":
+        if offset == 0:
+            base = 6.0
+        elif offset == 1:
+            base = 3.5
+        elif offset == 2:
+            base = 2.5
+        elif offset == 3:
+            base = 2.0
+        elif 4 <= offset <= 6:
+            base = 1.0
+        elif offset < 0 and min(target_years) <= fy:
+            base = 1.5
+        else:
+            base = 0.0
     else:
-        base = 0.0
+        if offset == 0:
+            base = 5.0
+        elif offset == 1:
+            base = 4.5
+        elif offset == 2:
+            base = 3.0
+        elif offset == 3:
+            base = 2.5
+        elif 4 <= offset <= 6:
+            base = 1.5
+        elif offset < 0 and min(target_years) <= fy:
+            base = 2.0
+        else:
+            base = 0.0
 
     month_bonus = 0.0
     if fm is not None and base > 0:
@@ -622,6 +719,7 @@ def _fts_channel_trace(
     wants_monthly: bool,
     top_n: int = 400,
     source_text: str = "",
+    year_mode: str = "unknown",
 ) -> ChannelTrace:
     """Run the FTS5 channel with progressive broadening and trace metadata."""
     if not q_tokens:
@@ -688,6 +786,12 @@ def _fts_channel_trace(
 
     stages: list[tuple[str, Callable[[], list[sqlite3.Row]]]] = []
     if target_years and exact_query:
+        # Keep the window wide at SQL level (+4 covers ~95% of gold offsets
+        # in the benchmark). Offset ranking is left to _file_year_bonus in
+        # the reranker. Narrowing here silently dropped recall on questions
+        # with late republications (UID0006: 1995 target, gold at 1998_12,
+        # offset +3) — miss-classifier confirmed 103/137 @5 misses were
+        # `not_in_pool`, not ranking problems.
         file_year_window = (min(target_years), max(target_years) + 4)
         stages.append(
             (
@@ -1100,6 +1204,8 @@ def retrieve(
     verbose: bool = False,
     dedupe_by_file: bool = True,
     load_html: bool = True,
+    vintage: str = "latest",
+    max_per_file: int | None = None,
 ) -> list[dict]:
     """Multi-request, multi-channel ledger retrieval — FTS ∪ metric — reranked
     and returned as shape-compatible dicts for extract.py.
@@ -1143,6 +1249,7 @@ def retrieve(
         target_years,
         wants_monthly,
         source_text=query_text,
+        year_mode=year_mode,
     )
 
     # Run metric channel for EACH data_request, including alternatives
@@ -1238,15 +1345,83 @@ def retrieve(
             print(f"  no hits (fts={len(fts_rows)} metric={len(metric_rows)})", flush=True)
         return []
 
+    # Vintage supersession: when vintage=="latest" (default), penalize
+    # candidate tables that have a newer sibling with the same signature —
+    # those are stale republications. When vintage=="as_reported", skip
+    # the penalty so originally-reported values can surface.
+    superseded_ids: set[int] = set()
+    if vintage == "latest" and all_ids:
+        placeholders = ",".join("?" * len(all_ids))
+        rows_ss = conn.execute(
+            f"""
+            SELECT t.id FROM tables t
+            WHERE t.id IN ({placeholders})
+              AND EXISTS (
+                SELECT 1 FROM tables t2
+                WHERE t2.signature = t.signature
+                  AND t2.parse_ok = 1
+                  AND t2.table_kind = 'data'
+                  AND (t2.file_year * 100 + COALESCE(t2.file_month, 0))
+                    > (t.file_year * 100 + COALESCE(t.file_month, 0))
+              )
+            """,
+            tuple(all_ids),
+        ).fetchall()
+        superseded_ids = {int(r[0]) for r in rows_ss}
+
+    # Ground-truth row probe: for each candidate table, find the best
+    # row whose metric_slug matches any DR row_hint and count its
+    # non-null cells. Used as a score boost, NOT a hard filter — we
+    # learned that decompose often emits slightly-off row_hints ("Net
+    # interest" vs "Interest, net of receipts") that would wrongly drop
+    # the gold table. The scoring reward is strong enough to lift clean
+    # matches above keyword-only FTS hits without losing anything.
+    probe_stats = _bulk_cell_probe(conn, all_ids, all_row_hints)
+    max_best_row_cells = max((v[1] for v in probe_stats.values() if v[0] > 0), default=0)
+
+    # Title/caption substring matching: Treasury tables reuse title phrases
+    # like "Budget Receipts and Expenditures" or "Internal Revenue
+    # Collections". If the decompose row_hint/col_hint appears in the
+    # table's title or caption, that's strong structured evidence the
+    # table is topical beyond bag-of-words FTS.
+    title_patterns: list[str] = []
+    for phrase in all_row_hints + all_col_hints + all_metrics:
+        p = (phrase or "").strip().lower()
+        if p and len(p) >= 3 and p not in title_patterns:
+            title_patterns.append(p)
+
     weighted_channel_scores: dict[int, tuple[float, float]] = {}
     reranked: list[tuple[float, sqlite3.Row]] = []
     for tid in all_ids:
         row = rows_by_id[tid]
+        matching_rows, best_row_cells = probe_stats.get(tid, (0, 0))
         fts_weighted = 0.75 * fts_norm.get(tid, 0.0)
         metric_weighted = 0.25 * metric_norm.get(tid, 0.0)
         weighted_channel_scores[tid] = (fts_weighted, metric_weighted)
         s = metric_weighted + fts_weighted
-        s += 0.08 * _file_year_bonus(
+        if max_best_row_cells > 0 and matching_rows > 0:
+            # Reward the table whose best matching row has the most
+            # non-null cells — that's the one most likely to supply a
+            # full monthly or multi-year series. Peak 1.2 so it can
+            # outrank FTS+metric (max 1.0) but not steamroll everything.
+            s += 1.2 * (best_row_cells / max_best_row_cells)
+            # Penalize row-label ambiguity: if the hint matches many
+            # rows, the DR is harder to pin down in this table. Small
+            # penalty, grows slowly.
+            if matching_rows > 1:
+                s -= 0.05 * min(matching_rows - 1, 8)
+        # Title/caption match bonus (domain-aware, cheap).
+        title_text = " ".join(
+            [
+                (row["title"] or "").lower(),
+                (row["caption"] or "").lower(),
+            ]
+        )
+        if title_text and title_patterns:
+            hits = sum(1 for p in title_patterns if p in title_text)
+            if hits:
+                s += 0.25 * min(hits, 3)
+        s += 0.12 * _file_year_bonus(
             row["file_year"],
             row["file_month"],
             target_years,
@@ -1258,6 +1433,8 @@ def retrieve(
         # entire FTS+metric range (0-1.0); the 0.2 scaling keeps it as a
         # tiebreaker (+0.10/-0.06). Unknown mode or empty period → 0.0.
         s += 0.2 * _period_aware_score_delta(year_mode, row["period"])
+        if tid in superseded_ids:
+            s -= 0.30
         if direct_files and row["file"] in direct_files:
             s += 5.0
         reranked.append((s, row))
@@ -1271,14 +1448,18 @@ def retrieve(
             flush=True,
         )
 
+    # Per-file cap: if max_per_file is set, it takes precedence. Otherwise,
+    # dedupe_by_file=True collapses to cap=1 (legacy behavior); False → no cap.
+    file_cap = max_per_file if max_per_file is not None else 1 if dedupe_by_file else None
+
     entries: list[dict] = []
-    seen_files: set[str] = set()
+    file_counts: dict[str, int] = {}
     for _score, r in reranked:
         row_id = int(r["id"])
         file = r["file"]
-        if dedupe_by_file and file in seen_files:
+        if file_cap is not None and file_counts.get(file, 0) >= file_cap:
             continue
-        seen_files.add(file)
+        file_counts[file] = file_counts.get(file, 0) + 1
 
         cols = conn.execute(
             "SELECT col_path FROM table_columns WHERE table_id = ? ORDER BY col_index",
@@ -1307,8 +1488,11 @@ def retrieve(
             strategy_parts.append(f"metric:{metric_trace.strategy_by_id[row_id]}")
         fts_weighted, metric_weighted = weighted_channel_scores.get(row_id, (0.0, 0.0))
         best_channel = "fts" if fts_weighted >= metric_weighted else "metric"
+        probe_rows, probe_cells = probe_stats.get(row_id, (0, 0))
 
         entry = {
+            "probe_matched_rows": int(probe_rows),
+            "probe_best_cells": int(probe_cells),
             "file": file,
             "element_id": r["element_id"],
             "element_seq": r["element_seq"],

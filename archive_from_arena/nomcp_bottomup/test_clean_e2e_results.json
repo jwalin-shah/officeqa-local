@@ -1,0 +1,72 @@
+[
+  {
+    "uid": "DEC_01",
+    "got_answer": "2,198",
+    "expected": "2,602",
+    "pass": false,
+    "error": null
+  },
+  {
+    "uid": "DEC_02",
+    "got_answer": "507",
+    "expected": "507",
+    "pass": true,
+    "error": null
+  },
+  {
+    "uid": "DEC_03",
+    "got_answer": "3,890",
+    "expected": "44,463",
+    "pass": false,
+    "error": null
+  },
+  {
+    "uid": "DEC_06",
+    "got_answer": "N/A",
+    "expected": "4.14",
+    "pass": false,
+    "error": null
+  },
+  {
+    "uid": "DEC_08",
+    "got_answer": "34,591",
+    "expected": "93,349",
+    "pass": false,
+    "error": null
+  },
+  {
+    "uid": "DEC_09",
+    "got_answer": "1,817",
+    "expected": "1,201",
+    "pass": false,
+    "error": null
+  },
+  {
+    "uid": "DEC_12",
+    "got_answer": "399.000000",
+    "expected": "0.00262",
+    "pass": false,
+    "error": null
+  },
+  {
+    "uid": "DEC_13",
+    "got_answer": "1.00",
+    "expected": "894",
+    "pass": false,
+    "error": null
+  },
+  {
+    "uid": "DEC_14",
+    "got_answer": "70.98",
+    "expected": "81.406",
+    "pass": false,
+    "error": null
+  },
+  {
+    "uid": "DEC_15",
+    "got_answer": "72.45%",
+    "expected": "73",
+    "pass": true,
+    "error": null
+  }
+]

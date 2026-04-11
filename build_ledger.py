@@ -53,7 +53,7 @@ FILENAME_RE = re.compile(r"treasury_bulletin_(\d{4})_(\d{2})")
 YEAR_RE = re.compile(r"\b(1[89]\d{2}|20[0-3]\d)\b")
 MONTH_RE = re.compile(
     r"\b(january|february|march|april|may|june|july|august|september|october|november|december|"
-    r"jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b",
+    r"jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)\b",
     re.IGNORECASE,
 )
 MONTH_TO_INT = {
@@ -77,6 +77,7 @@ MONTH_TO_INT = {
     "jul": 7,
     "aug": 8,
     "sep": 9,
+    "sept": 9,
     "oct": 10,
     "nov": 11,
     "dec": 12,
@@ -617,7 +618,13 @@ def cross_check(lxml_result: dict, pandas_result: dict) -> str:
     if not pandas_result["parse_ok"]:
         return "lxml_only"
 
-    n_header_rows = sum(1 for h in lxml_result["is_header"] if h)
+    # Only count CONTIGUOUS top header rows (consistent with build_column_paths)
+    n_header_rows = 0
+    for h in lxml_result["is_header"]:
+        if h:
+            n_header_rows += 1
+        else:
+            break
     lxml_data_rows = max(0, lxml_result["n_rows"] - n_header_rows)
     pandas_data_rows = pandas_result["n_data_rows"]
 
@@ -639,7 +646,16 @@ def build_column_paths(grid: list[list[str]], is_header: list[bool]) -> list[dic
     if not grid:
         return []
     n_cols = len(grid[0]) if grid else 0
-    header_row_indices = [i for i, h in enumerate(is_header) if h]
+    # Only use CONTIGUOUS header rows from the top of the table.
+    # A <th> row buried in the middle (e.g. a sub-section header) should
+    # NOT be joined into the column path — it may have shifted alignment
+    # or different semantics.
+    header_row_indices: list[int] = []
+    for i, h in enumerate(is_header):
+        if h:
+            header_row_indices.append(i)
+        else:
+            break  # stop at first non-header row
 
     # If no header rows detected, treat the first row as the header.
     if not header_row_indices and grid:
@@ -702,8 +718,19 @@ def build_row_entries(
     # the prefix at depths < their own.
     ancestry: list[str] = []
 
+    # Find where contiguous top headers end
+    first_non_header = 0
+    for i, h in enumerate(is_header):
+        if h:
+            first_non_header = i + 1
+        else:
+            break
+
     for r in range(n_rows):
-        if is_header[r]:
+        # Only skip contiguous top header rows. Mid-table <th> rows
+        # (sub-section headers deep in the body) should be kept and
+        # treated as section headers, not silently dropped.
+        if is_header[r] and r < first_non_header:
             continue
         row_cells = grid[r]
         label = (row_cells[0] if row_cells else "").strip()
@@ -794,6 +821,90 @@ def extract_year_month(text: str) -> tuple[int | None, int | None]:
     return year, month
 
 
+# Pattern: "Month YYYY" pairs for title date-range parsing
+_MONTH_YEAR_RE = re.compile(
+    r"\b(january|february|march|april|may|june|july|august|september|october|"
+    r"november|december|jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)"
+    r"[\s.,]*(\d{4})\b",
+    re.IGNORECASE,
+)
+
+
+def _title_date_range(title: str) -> tuple[int, int, int, int] | None:
+    """Parse a rolling-series title like 'March 1979 through February 1980'.
+
+    Returns (start_month, start_year, end_month, end_year) when the title
+    contains at least two Month+Year pairs, else None.
+    """
+    matches = _MONTH_YEAR_RE.findall(title)
+    if len(matches) < 2:
+        return None
+    start_m = MONTH_TO_INT.get(matches[0][0].lower())
+    start_y = int(matches[0][1])
+    end_m = MONTH_TO_INT.get(matches[-1][0].lower())
+    end_y = int(matches[-1][1])
+    if not start_m or not end_m:
+        return None
+    # Sanity: end must be after start, within a 24-month window
+    total_months = (end_y - start_y) * 12 + (end_m - start_m)
+    if not (0 < total_months <= 24):
+        return None
+    return start_m, start_y, end_m, end_y
+
+
+def _fill_column_years(cols: list[dict], title: str) -> list[dict]:
+    """For Type-B rolling-series tables, infer year_extracted on columns
+    that have month_extracted but no year_extracted.
+
+    Treasury rolling tables have titles like "March 1979 through February 1980"
+    with column headers that are just month abbreviations ("Mar.", "Apr.", ...).
+    The year isn't in the column header — it's deducible from the title range
+    and the column's sequential position in the month sequence.
+
+    Algorithm:
+      1. Parse start and end (month, year) from title.
+      2. Generate the ordered (month, year) sequence for that range.
+      3. Walk columns in order; for each month-only column, assign the
+         matching year from the sequence (advancing through it).
+    """
+    date_range = _title_date_range(title)
+    if not date_range:
+        return cols
+    start_m, start_y, end_m, end_y = date_range
+
+    # Build expected (month, year) sequence
+    sequence: list[tuple[int, int]] = []
+    y, m = start_y, start_m
+    while (y < end_y) or (y == end_y and m <= end_m):
+        sequence.append((m, y))
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+        if len(sequence) > 25:
+            break
+
+    # Walk columns in order; for each month-only col, consume next matching
+    # entry from the sequence.
+    seq_pos = 0
+    for col in cols:
+        if col["year_extracted"] is not None or col["month_extracted"] is None:
+            continue
+        col_month = col["month_extracted"]
+        # Advance sequence to find next occurrence of this month
+        found = False
+        for i in range(seq_pos, len(sequence)):
+            if sequence[i][0] == col_month:
+                col["year_extracted"] = sequence[i][1]
+                seq_pos = i + 1
+                found = True
+                break
+        if not found:
+            # Month not in remaining sequence — stop to avoid wrong assignments
+            break
+
+    return cols
+
+
 # ── Cell normalization ──────────────────────────────────────────────────────
 
 
@@ -845,9 +956,12 @@ def normalize_cell(raw: str | None) -> dict:
     work = s
 
     # Trailing footnote markers: "1/", "2/", "*", "†"
-    if re.search(r"(\s*\d+/\s*$)|(\s*\*+\s*$)|(\s*†\s*$)", work):
+    # For digit footnotes, strip a SINGLE trailing digit+/ first (handles
+    # OCR-fused cells like "10,0653/" → "10,065" with footnote 3/).
+    # Then also handle space-separated multi-digit markers like " 12/".
+    if re.search(r"(\d/\s*$)|(\s\d{1,2}/\s*$)|(\s*\*+\s*$)|(\s*†\s*$)", work):
         out["has_footnote"] = 1
-        work = re.sub(r"(\s*\d+/\s*$)|(\s*\*+\s*$)|(\s*†\s*$)", "", work).strip()
+        work = re.sub(r"(\s+\d{1,2}/\s*$)|(\d/\s*$)|(\s*\*+\s*$)|(\s*†\s*$)", "", work).strip()
 
     # Leading footnote markers (less common but exists)
     if re.match(r"^\s*\d+/", work) and not re.match(r"^\s*\d+/\d+\s*$", work):
@@ -1357,6 +1471,9 @@ def process_file(conn: sqlite3.Connection, path: Path) -> dict:
 
         # Build columns and rows
         cols = build_column_paths(auth["grid"], auth["is_header"])
+        # For rolling-series tables (Type B), infer year_extracted on
+        # month-only columns from the title date range.
+        cols = _fill_column_years(cols, current_title or "")
         rows = build_row_entries(
             auth["grid"],
             auth["is_header"],

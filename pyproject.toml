@@ -20,6 +20,25 @@ dependencies = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+extend-exclude = [
+    "archive_from_arena",
+    # Analysis / eval scratch scripts — not production code paths
+    "analyze_arena_traces.py",
+    "analyze_retrieve_misses.py",
+    "eval_agent_fallback.py",
+    "eval_agent_full.py",
+    "eval_decompose.py",
+    "eval_extract_oracle.py",
+    "eval_hybrid_oracle.py",
+    "eval_retrieve.py",
+    "search_agent.py",
+    "test_recall_with_decompose.py",
+    # Legacy — not part of the active pipeline (see CLAUDE.md)
+    "decompose.py",
+    "orchestrator.py",
+    "agent.py",
+    "evaluate.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -36,8 +55,19 @@ testpaths = ["tests"]
 addopts = "--cov=. --cov-report=term-missing"
 
 [tool.bandit]
-exclude_dirs = [".venv", "tests"]
-skips = ["B101", "B404", "B110", "B112", "B603", "B607"]
+exclude_dirs = [
+    ".venv",
+    "tests",
+    "archive_from_arena",
+]
+# B307 safe eval with restricted builtins in find.py (documented)
+# B310 urllib.urlopen on trusted fixed URLs
+# B403 pickle for local corpus index
+# B608 parameterized SQL using dynamic ? placeholder counts
+skips = [
+    "B101", "B404", "B110", "B112", "B603", "B607",
+    "B307", "B310", "B403", "B608",
+]
 
 [dependency-groups]
 dev = [

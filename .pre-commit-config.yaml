@@ -1,0 +1,56 @@
+# Exclude archive and scratch analysis/eval scripts from all hooks.
+# These are reference material or one-off scripts, not the active pipeline.
+exclude: |
+  (?x)^(
+    archive_from_arena/.*|
+    analyze_arena_traces\.py|
+    analyze_retrieve_misses\.py|
+    eval_agent_fallback\.py|
+    eval_agent_full\.py|
+    eval_bottomup\.py|
+    eval_decompose\.py|
+    eval_decompose_oracle\.py|
+    eval_direct_oracle\.py|
+    eval_extract_oracle\.py|
+    eval_hybrid_oracle\.py|
+    eval_ledger\.py|
+    eval_retrieve\.py|
+    migrate_fill_column_years\.py|
+    migrate_propagate_year\.py|
+    retrieve_files\.py|
+    search_agent\.py|
+    survey_json_structure\.py|
+    test_recall_with_decompose\.py|
+    validate_decompose\.py|
+    verify_files_db\.py|
+    agent\.py|
+    decompose\.py|
+    evaluate\.py|
+    orchestrator\.py|
+    uv\.lock
+  )$
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      - id: detect-private-key
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.9.4
+    hooks:
+      - id: bandit
+        args: ["-c", "pyproject.toml"]
+        additional_dependencies: ["bandit[toml]"]

@@ -1,0 +1,26 @@
+[
+  {
+    "uid": "DEC_01",
+    "question": "What were the total expenditures (in millions of nominal dollars) for U.S national defense in the calendar year of 1940?",
+    "got_answer": "3,961",
+    "expected": "2,602",
+    "pass": false,
+    "elapsed": "55.0s"
+  },
+  {
+    "uid": "DEC_02",
+    "question": "What were the total expenditures of the U.S federal government (in millions of nominal dollars) for the Veterans Administration in FY 1934?",
+    "got_answer": "N/A",
+    "expected": "507",
+    "pass": false,
+    "elapsed": "45.9s"
+  },
+  {
+    "uid": "DEC_09",
+    "question": "What was the absolute difference between total budget receipts in FY 1950 and FY 1949? (In millions of dollars)",
+    "got_answer": "4,623",
+    "expected": "28",
+    "pass": false,
+    "elapsed": "27.9s"
+  }
+]

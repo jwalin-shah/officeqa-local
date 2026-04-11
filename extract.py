@@ -89,6 +89,104 @@ class _TableHTMLParser(HTMLParser):
             self._current_cell.append(f"&{name};")
 
 
+def _disambiguate_row_labels(rows: list[list[str]]) -> list[list[str]]:
+    """Prefix bare month-name row labels with the inferred year.
+
+    Treasury tables often have rows like:
+        1939-December | 125
+        January       | 132
+        February      | 129
+        ...
+        December      | 473
+        1941          | 2602
+
+    The bare months after "1939-December" belong to 1940 (the next calendar
+    year). This function detects the pattern and rewrites bare months to
+    "1940-January", "1940-February", etc. so the LLM can unambiguously
+    identify each row.
+
+    Only modifies the first cell (row label) of data rows (skips header row 0).
+    """
+    if len(rows) < 2:
+        return rows
+
+    current_year: int | None = None
+    month_names = {
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "sept",
+        "oct",
+        "nov",
+        "dec",
+        "jan.",
+        "feb.",
+        "mar.",
+        "apr.",
+        "may.",
+        "jun.",
+        "jul.",
+        "aug.",
+        "sep.",
+        "sept.",
+        "oct.",
+        "nov.",
+        "dec.",
+    }
+
+    result = [rows[0]]  # keep header as-is
+    for row in rows[1:]:
+        if not row:
+            result.append(row)
+            continue
+        label = row[0].strip()
+        label_lower = label.lower()
+
+        # Detect "YYYY-MonthName" or "YYYY MonthName" pattern
+        year_month = re.match(r"^(\d{4})[\s\-](\w+)", label)
+        if year_month:
+            y = int(year_month.group(1))
+            m = year_month.group(2).lower().rstrip(".")
+            if m in month_names or m + "." in month_names:
+                month_idx = _detect_month_index(year_month.group(2))
+                current_year = y + 1 if month_idx == 12 else y
+            result.append(row)
+            continue
+
+        # Bare "YYYY" row — reset year tracking
+        if re.match(r"^\d{4}$", label):
+            current_year = None
+            result.append(row)
+            continue
+
+        # Bare month name — prefix with inferred year
+        if current_year is not None and label_lower.rstrip(".") in month_names:
+            new_label = f"{current_year}-{label}"
+            result.append([new_label] + row[1:])
+            continue
+
+        result.append(row)
+
+    return result
+
+
 def html_to_pipe_text(html: str, max_rows: int = 80) -> str:
     """Render a <table> HTML blob into pipe-delimited lines the LLM can read.
 
@@ -104,10 +202,11 @@ def html_to_pipe_text(html: str, max_rows: int = 80) -> str:
         return ""
     if not parser.rows:
         return ""
+    rows = _disambiguate_row_labels(parser.rows)
     lines = []
-    for i, row in enumerate(parser.rows):
+    for i, row in enumerate(rows):
         if i >= max_rows:
-            lines.append(f"... ({len(parser.rows) - max_rows} more rows truncated)")
+            lines.append(f"... ({len(rows) - max_rows} more rows truncated)")
             break
         lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines)
@@ -261,8 +360,9 @@ def html_to_vertical_text(html: str, max_rows: int = 80, vertical_threshold: int
     if len(parser.rows) < 2:
         return ""
 
-    header_row = parser.rows[0]
-    data_rows = parser.rows[1:]
+    disambiguated = _disambiguate_row_labels(parser.rows)
+    header_row = disambiguated[0]
+    data_rows = disambiguated[1:]
 
     # Check column count (header columns include row label)
     if len(header_row) < vertical_threshold:
@@ -304,7 +404,7 @@ def html_to_vertical_text(html: str, max_rows: int = 80, vertical_threshold: int
     return "\n".join(lines)
 
 
-def render_entry(entry: dict, vertical_threshold: int = 8) -> str:
+def render_entry(entry: dict, vertical_threshold: int = 8, max_rows: int = 80) -> str:
     """Turn a retrieve_v2 table entry into a labelled context block.
 
     Wide tables (≥vertical_threshold columns) are rendered in vertical
@@ -314,10 +414,13 @@ def render_entry(entry: dict, vertical_threshold: int = 8) -> str:
     title = (entry.get("title") or "").strip()
     caption = (entry.get("caption") or "").strip()
     element_id = entry.get("element_id")
+    page_id = entry.get("page_id")
 
     header_bits = [f"# {file}"]
     if element_id is not None:
         header_bits[0] += f" (table #{element_id})"
+    if page_id is not None:
+        header_bits[0] += f" [page {page_id}]"
     if title:
         header_bits.append(f"Title: {title}")
     if section and section != title:
@@ -325,26 +428,38 @@ def render_entry(entry: dict, vertical_threshold: int = 8) -> str:
     if caption:
         header_bits.append(f"Caption: {caption}")
 
+    # Prose/footnote entries carry text in "content", not HTML tables
+    content = (entry.get("content") or "").strip()
     html = entry.get("html") or ""
 
-    # Try vertical format first for wide tables
-    vertical = html_to_vertical_text(html, vertical_threshold=vertical_threshold)
-    if vertical:
-        body = vertical
+    if content and not html:
+        body = content
     else:
-        body = html_to_pipe_text(html)
-        if not body:
-            return ""
+        # Try vertical format first for wide tables
+        vertical = html_to_vertical_text(
+            html, max_rows=max_rows, vertical_threshold=vertical_threshold
+        )
+        if vertical:
+            body = vertical
+        else:
+            body = html_to_pipe_text(html, max_rows=max_rows)
+            if not body:
+                return ""
 
     return "\n".join(header_bits) + "\n" + body
 
 
-def build_context_from_entries(entries: list[dict], char_budget: int = 10000) -> str:
+def build_context_from_entries(
+    entries: list[dict],
+    char_budget: int = 10000,
+    vertical_threshold: int = 8,
+    max_rows: int = 80,
+) -> str:
     """Render a list of retrieve_v2 entries into one context blob, stopping at budget."""
     parts: list[str] = []
     total = 0
     for e in entries:
-        block = render_entry(e)
+        block = render_entry(e, vertical_threshold=vertical_threshold, max_rows=max_rows)
         if not block:
             continue
         if total + len(block) > char_budget:
@@ -920,8 +1035,19 @@ def extract_answer(
 
 # ── Structured extraction (v2) ──────────────────────────────────────────────
 
-EXTRACT_STRUCTURED_SYSTEM = """You extract raw numeric values from U.S. Treasury
-Bulletin tables to fill slots defined in a QuestionSpec.
+EXTRACT_STRUCTURED_SYSTEM = """You are a collaborator on a research effort to
+answer U.S. Treasury Bulletin questions. Your job is to extract raw numbers
+faithfully from the tables you are given — the pipeline downstream trusts what
+you return and cannot recover from a fabricated value. Work carefully; a
+correct null is worth more than a confident guess.
+
+It is OK to return null for a value you cannot find. It is not OK to invent
+one. When a cell is missing, unreadable, or ambiguous, return null and explain
+what you saw in `notes`. The pipeline can retry on a flagged null; it cannot
+undo a plausible-looking fake number.
+
+You extract raw numeric values from U.S. Treasury Bulletin tables to fill
+slots defined in a QuestionSpec.
 
 CRITICAL RULE: You DO NOT compute anything. You only extract raw numbers from
 tables and cite where they came from. Python will run the computation later.
@@ -930,14 +1056,32 @@ EXTRACTION CHECKLIST (these are the failure modes we paid to find):
   - UNITS: note the table's scale ("in millions", "in thousands") in `notes`
     if it isn't the obvious default. Return the RAW number as printed — the
     formatter handles unit conversion. Do not pre-scale.
+  - FISCAL YEAR BOUNDARIES. The spec's granularity tells you whether the
+    answer is an annual/FY row or a sum of 12 monthly rows, but when you're
+    confirming you grabbed the right row remember:
+      - pre-1977  FY = Jul 1 (YYYY-1) through Jun 30 YYYY
+      - post-1976 FY = Oct 1 (YYYY-1) through Sep 30 YYYY
+      - CY        = Jan 1 through Dec 31 (sum of 12 monthly rows)
+    A bare "YYYY" row in a post-1976 table is the fiscal year, not the
+    calendar year. Never return an FY row when the spec asked for CY.
   - TOTAL vs SUB-CATEGORY: if the spec asks for a specific child line, never
     return the "Total X" row value. Total rows already include all children.
   - ACTUAL vs ESTIMATED: when both are present, prefer the actual row.
+  - PERCENTAGE COLUMNS: when the table already contains a "% increase",
+    "% change", or "Percent change" column, extract the TABLE'S printed
+    percentage directly. Do NOT compute percentages from raw amounts —
+    the table's pre-rounded value is what downstream expects.
   - ANNUAL vs MONTHLY: a monthly row is not an annual total. For
     granularity="annual", return the single year-labeled row; for
     granularity="monthly_all", return all 12 monthly rows.
   - COLUMN POSITION: wide tables with multi-level headers are easy to misread.
-    Confirm the column by its header text, not its position.
+    If multiple columns could plausibly match, return the one whose header
+    text contains the `column_hint` substring. Confirm by header text, never
+    guess by position.
+  - VINTAGE: the spec carries `vintage: "latest"` or `"as_reported"`. When
+    "latest" (the default), prefer revised/canonical values — a later
+    bulletin's restated figure beats the original. When "as_reported", use
+    the value as it was originally published and ignore later revisions.
 
 TABLE FORMAT:
 - Pipe-delimited: | row_label | val1 | val2 | ...
@@ -959,13 +1103,46 @@ FOR EACH data_request in the QuestionSpec:
 values[] must contain exactly expected_count numbers (or null for missing).
 Return the raw extracted number — no scaling, no unit conversion, no math.
 
+SOURCE_UNIT (REQUIRED): For every extraction, set `source_unit` to the unit
+the RAW values are printed in. Look at the table caption, section header,
+column header, or row label for phrases like "in millions", "(thousands of
+dollars)", "$ billions", "percent", "Index", etc. Use exactly one of:
+  - "thousands_usd" — table values are in thousands of dollars
+  - "millions_usd"  — table values are in millions of dollars
+  - "billions_usd"  — table values are in billions of dollars
+  - "usd"           — table values are in raw dollars
+  - "percent"       — table values are percentages
+  - "index"         — index points / basis points
+  - "count"         — counts / units of something other than money
+  - null            — only if you genuinely cannot tell
+This field is load-bearing: downstream math uses it to scale into the unit
+the question asks for. A wrong source_unit silently corrupts every answer
+that involves a non-linear op (box-cox, log, geometric mean, ratios across
+mixed-unit tables). When in doubt, look for "(in millions of dollars)" near
+the title — that is the most common form.
+
+GROUNDING (REQUIRED): For EACH value you extract, you MUST cite the exact
+cell coordinates where you found it. This is how we verify your work:
+  - "row_label": the EXACT text of the first column in that row, as printed
+  - "col_label": the EXACT column header text above the cell you read
+These coordinates let the pipeline cross-check your extraction against the
+parsed table. If you cannot identify the exact row/column for a value,
+return null for that value — a verifiable null is better than an ungrounded
+number.
+
+For PROSE / text entries (non-table context), set row_label and col_label to
+null and put the source passage in notes.
+
 Output ONLY valid JSON matching this schema:
 {
   "extractions": {
     "v1": {
       "values": [132, 129, 143, 159, 154, 153, 177, 200, 219, 287, 376, 473],
       "labels": ["1940-January", "February", "March", ...],
+      "row_labels": ["1940-January", "February", "March", ...],
+      "col_labels": ["National defense", "National defense", ...],
       "source_file": "treasury_bulletin_1941_01.txt",
+      "source_unit": "millions_usd",
       "confidence": "high"
     }
   },
@@ -1232,8 +1409,76 @@ def pre_extract_monthly_values(text: str, dr: dict, spec: dict) -> str | None:
     return None
 
 
+def _resolve_external_dr(dr: dict) -> list[float] | None:
+    """Resolve a non-corpus data_request directly from a known source.
+
+    Returns a list of values to inject into extractions, or None if the
+    source is unknown / unsupported. Skips the LLM extractor entirely
+    for these — corpus tables don't contain CPI/FX/external lookups,
+    so asking the LLM to find them there always returns nulls.
+    """
+    src = (dr.get("source") or "corpus").lower()
+    if src == "corpus":
+        return None
+
+    years = [int(y) for y in (dr.get("years") or []) if y is not None]
+
+    if src == "cpi":
+        try:
+            from cpi import A as _CPI_A  # BLS official annual averages
+        except Exception:
+            return None
+        out: list[float] = []
+        for y in years:
+            val = _CPI_A.get(y)
+            if val is not None:
+                out.append(val)
+        return out or None
+
+    if src in ("fx", "external"):
+        try:
+            from external_data import resolve_fx_dr
+        except Exception:
+            return None
+        return resolve_fx_dr(dr)
+
+    return None
+
+
+# ── Multi-year entry coverage ──────────────────────────────────────────────
+
+
+def _ensure_year_coverage(entries: list[dict], year_set: set[int]) -> list[dict]:
+    """Reorder entries so at least one entry per required year appears early.
+
+    For multi-year DRs (continuous_monthly, multi_year_annual), the first
+    file's tables can consume the entire char budget before entries covering
+    later years are rendered.  This promotes one entry per uncovered year
+    to the front, then appends the rest in their original order.
+    """
+    if len(year_set) <= 1:
+        return entries
+    covered: set[int] = set()
+    priority: list[dict] = []
+    rest: list[dict] = []
+    for e in entries:
+        e_years = set(e.get("years") or [])
+        uncovered = (e_years & year_set) - covered
+        if uncovered:
+            covered.update(uncovered)
+            priority.append(e)
+        else:
+            rest.append(e)
+    return priority + rest
+
+
 def extract_structured(
-    spec: dict, per_dr_entries: dict, question: str, verbose: bool = False, feedback: str = ""
+    spec: dict,
+    per_dr_entries: dict,
+    question: str,
+    verbose: bool = False,
+    feedback: str = "",
+    _alt_render: bool = False,
 ) -> dict | None:
     """Extract structured values per the QuestionSpec's data_requests.
 
@@ -1245,6 +1490,29 @@ def extract_structured(
     if not data_requests:
         return None
 
+    # ── Pre-resolve non-corpus DRs (CPI, FX, external) ──────────────────
+    # The LLM extractor only sees corpus tables, so source=cpi/fx/external
+    # DRs would always come back null. Resolve them deterministically here
+    # and inject the values into the final extractions dict.
+    preinjected: dict[str, dict] = {}
+    corpus_drs: list[dict] = []
+    for dr in data_requests:
+        src = (dr.get("source") or "corpus").lower()
+        if src == "corpus":
+            corpus_drs.append(dr)
+            continue
+        vals = _resolve_external_dr(dr)
+        if vals:
+            preinjected[dr.get("id", "?")] = {
+                "values": vals,
+                "label": dr.get("label", ""),
+                "source": src,
+            }
+        else:
+            # Unresolvable external DR — still let the LLM try in case
+            # the value happens to live in a corpus table.
+            corpus_drs.append(dr)
+
     per_request_context: list[str] = []
     # Top-k retrieval returns 10 entries per DR. With dedupe_by_file we care
     # about seeing rank 9-10 as often as rank 1, so the budget has to be wide
@@ -1252,13 +1520,53 @@ def extract_structured(
     per_request_budget = max(6000, 24000 // max(1, len(data_requests)))
 
     any_hit = False
-    for dr in data_requests:
+    for dr in corpus_drs:
         dr_id = dr.get("id", "?")
         dr_label = dr.get("label", "")
         dr_years = [y for y in (dr.get("years") or [])]
         granularity = dr.get("granularity", "?")
         entries = per_dr_entries.get(dr_id) or []
-        ctx = build_context_from_entries(entries, char_budget=per_request_budget) if entries else ""
+        # Reorder entries so tables relevant to this DR's years come first.
+        # Matters when multiple DRs share an entry pool (e.g. oracle eval or
+        # multi-year questions) — the wrong table otherwise wins the char
+        # budget race and the right one gets truncated, leaving the LLM to
+        # return nulls because "the 1953 data wasn't in the context".
+        if dr_years and entries:
+            dr_year_set = {int(y) for y in dr_years}
+
+            def _year_match_score(e: dict) -> tuple[int, int]:
+                file_year = e.get("file_year")
+                if file_year is None:
+                    file_year = 0
+                e_years = set(e.get("years") or [])
+                # Prefer tables whose row/column years overlap the DR's years;
+                # fall back to file_year proximity. Lower score = earlier.
+                overlap = len(dr_year_set & e_years)  # noqa: B023
+                if overlap:
+                    return (0, -overlap)
+                proximity = min(
+                    (abs(int(file_year) - y) for y in dr_year_set),  # noqa: B023
+                    default=9999,
+                )
+                return (1, proximity)
+
+            entries = sorted(entries, key=_year_match_score)
+            # For multi-year DRs, promote one entry per uncovered year to
+            # the front so the char budget is spread across all years.
+            if len(dr_year_set) > 1:
+                entries = _ensure_year_coverage(entries, dr_year_set)
+        _vt = 999 if _alt_render else 8
+        _mr = 150 if _alt_render else 80
+        ctx = (
+            build_context_from_entries(
+                entries,
+                char_budget=per_request_budget,
+                vertical_threshold=_vt,
+                max_rows=_mr,
+            )
+            if entries
+            else ""
+        )
 
         # Apply CY row filtering for monthly_all questions — suppress
         # annual/FY summary rows so the LLM doesn't pick the wrong total
@@ -1278,19 +1586,25 @@ def extract_structured(
         else:
             per_request_context.append(f"{header}\n(no tables retrieved for this data_request)")
 
-    if not any_hit:
+    if not any_hit and not preinjected:
         return None
     context = "\n\n".join(per_request_context)
 
     import json as _json
 
+    # Only show the LLM the corpus DRs it's responsible for. Pre-resolved
+    # ones are merged back in after the call.
     spec_json = _json.dumps(
         {
             "computation": spec.get("computation"),
-            "data_requests": data_requests,
+            "data_requests": corpus_drs or data_requests,
         },
         indent=2,
     )
+
+    # If every DR was pre-resolved, skip the LLM call entirely.
+    if not corpus_drs:
+        return {"extractions": preinjected}
 
     feedback_block = ""
     if feedback:
@@ -1329,7 +1643,422 @@ def extract_structured(
 
     if "extractions" not in result:
         return None
+
+    # Merge in pre-resolved external DRs (CPI etc.) so the cohesion check
+    # below sees a complete picture.
+    if preinjected:
+        merged = dict(result.get("extractions") or {})
+        for k, v in preinjected.items():
+            merged[k] = v
+        result["extractions"] = merged
+
+    # ── Cohesion: ensure every spec DR id was filled ─────────────────────
+    # The LLM occasionally returns keys that don't match spec ids (e.g.
+    # "value_1" instead of "v1") or silently drops a DR — both manifest as
+    # downstream COMPUTE_FAIL "v1=1, v2=0". Try to remap by position/label
+    # first, then retry once with explicit feedback if anything is still
+    # missing.
+    spec_dr_ids = [dr.get("id") for dr in data_requests if dr.get("id")]
+    extractions = result.get("extractions") or {}
+
+    def _missing_ids(ex: dict) -> list[str]:
+        # A DR is "missing" if it's absent, has no values list, OR has a
+        # values list where every entry is null. The all-null case is the
+        # dominant failure mode: the LLM fills in labels but gives up on
+        # numbers, which looks filled to a naive emptiness check but is
+        # indistinguishable from missing to the compute phase.
+        out = []
+        for did in spec_dr_ids:
+            v = ex.get(did) or {}
+            vals = v.get("values") or []
+            if not vals or not any(x is not None for x in vals):
+                out.append(did)
+        return out
+
+    if isinstance(extractions, dict) and spec_dr_ids:
+        # Position-based fallback: if extractions has the right number of
+        # entries but mismatched keys, remap by spec order.
+        missing = _missing_ids(extractions)
+        if missing and len(extractions) == len(spec_dr_ids):
+            ex_keys = list(extractions.keys())
+            if any(k not in spec_dr_ids for k in ex_keys):
+                remapped = {
+                    spec_dr_ids[i]: extractions[ex_keys[i]] for i in range(len(spec_dr_ids))
+                }
+                if not _missing_ids(remapped):
+                    result["extractions"] = remapped
+                    extractions = remapped
+
+        # ── Combined quality retry: missing + incomplete + labels-but-null ──
+        # One retry addresses all extraction quality issues at once so we
+        # stay within the LLM-call budget (max 2 calls per extract phase).
+        missing = _missing_ids(extractions)
+
+        def _incomplete_drs() -> list[tuple[str, int, int]]:
+            out: list[tuple[str, int, int]] = []
+            for dr in data_requests:
+                did = dr.get("id")
+                exp = dr.get("expected_count")
+                if not did or not exp or not isinstance(exp, int):
+                    continue
+                if did in (missing or []):
+                    continue  # already counted as missing
+                v = extractions.get(did) or {}
+                vals = [x for x in (v.get("values") or []) if x is not None]
+                if 0 < len(vals) < exp:
+                    out.append((did, len(vals), exp))
+            return out
+
+        incomplete = _incomplete_drs()
+
+        if (missing or incomplete) and not feedback:
+            feedback_parts: list[str] = []
+
+            # Detect labels-but-null pattern → use alt rendering on retry
+            has_labels_null = (
+                any((extractions.get(did) or {}).get("labels") for did in missing)
+                if missing
+                else False
+            )
+
+            if missing:
+                missing_details = []
+                for did in missing:
+                    v = extractions.get(did) or {}
+                    dr_meta = next((d for d in data_requests if d.get("id") == did), {}) or {}
+                    hint = (
+                        f"{did}: label={dr_meta.get('label')!r} "
+                        f"years={dr_meta.get('years')} "
+                        f"row_hint={dr_meta.get('row_hint')!r} "
+                        f"granularity={dr_meta.get('granularity')!r}"
+                    )
+                    prev_labels = v.get("labels")
+                    prev_notes = v.get("notes")
+                    if prev_labels:
+                        hint += f" — you returned labels={prev_labels} but all values were null"
+                    if prev_notes:
+                        hint += f" (note: {prev_notes!r})"
+                    missing_details.append(hint)
+                feedback_parts.append(
+                    "These data_requests had NO usable values:\n  - "
+                    + "\n  - ".join(missing_details)
+                )
+
+            if incomplete:
+                incomplete_details = []
+                for did, got, exp in incomplete:
+                    dr_meta = next((d for d in data_requests if d.get("id") == did), {}) or {}
+                    labels = (extractions.get(did) or {}).get("labels") or []
+                    incomplete_details.append(
+                        f"{did}: got {got}/{exp} values "
+                        f"(labels={labels}, years={dr_meta.get('years')}, "
+                        f"granularity={dr_meta.get('granularity')!r}). "
+                        f"Look for the missing entries in other tables."
+                    )
+                feedback_parts.append(
+                    "These data_requests had FEWER values than expected:\n  - "
+                    + "\n  - ".join(incomplete_details)
+                )
+
+            retry_feedback = (
+                "\n\n".join(feedback_parts)
+                + "\n\nScan ALL provided tables for each problematic id. "
+                "Different DRs may need different tables. If a DR asks for "
+                "a different year than another, look for the table whose "
+                "file_year or row labels match that DR's year. Only return "
+                "null for an individual cell if the row exists but the cell "
+                "is truly blank/-/nan."
+            )
+            if verbose:
+                labels = []
+                if missing:
+                    labels.append(f"missing={missing}")
+                if incomplete:
+                    labels.append(f"incomplete={[(d, g, e) for d, g, e in incomplete]}")
+                print(f"  Quality retry: {', '.join(labels)}")
+
+            retry = extract_structured(
+                spec,
+                per_dr_entries,
+                question,
+                verbose=verbose,
+                feedback=retry_feedback,
+                _alt_render=has_labels_null,
+            )
+            if retry and retry.get("extractions"):
+                retry_ex = retry["extractions"]
+                merged = dict(extractions)
+                # For missing DRs: take retry if any non-null values
+                for did in missing:
+                    retry_v = retry_ex.get(did) or {}
+                    retry_vals = retry_v.get("values") or []
+                    if any(x is not None for x in retry_vals):
+                        merged[did] = retry_v
+                # For incomplete DRs: take retry if more non-null values
+                for did, got, _exp in incomplete:
+                    retry_v = retry_ex.get(did) or {}
+                    retry_nonnull = [x for x in (retry_v.get("values") or []) if x is not None]
+                    if len(retry_nonnull) > got:
+                        merged[did] = retry_v
+                result["extractions"] = merged
+                extractions = merged
+
+    _normalize_extraction_units(
+        result.get("extractions") or {}, data_requests, spec, verbose=verbose
+    )
+    _verify_against_ledger(
+        result.get("extractions") or {}, data_requests, per_dr_entries, verbose=verbose
+    )
+    _filter_cohort_aggregates(result.get("extractions") or {}, data_requests, verbose=verbose)
     return result
+
+
+# ── Ledger cross-check (post-extraction) ─────────────────────────────────
+
+
+def _verify_against_ledger(
+    extractions: dict,
+    data_requests: list[dict],
+    per_dr_entries: dict,
+    verbose: bool = False,
+) -> None:
+    """In-place: cross-check extracted values against the HTML table cells.
+
+    For each extraction that cites row_labels and col_labels, parses the
+    source table HTML and verifies the LLM's value matches the actual cell.
+    Flags mismatches in the extraction's 'verification' field. On mismatch,
+    replaces the value with the ground-truth cell value if unambiguous.
+    """
+    for dr in data_requests:
+        dr_id = dr.get("id")
+        if not dr_id:
+            continue
+        ex = extractions.get(dr_id)
+        if not isinstance(ex, dict):
+            continue
+        values = ex.get("values") or []
+        row_labels = ex.get("row_labels") or []
+        col_labels = ex.get("col_labels") or []
+        if not row_labels or not col_labels:
+            continue
+        if len(row_labels) != len(values) or len(col_labels) != len(values):
+            continue
+
+        entries = per_dr_entries.get(dr_id) or []
+        if not entries:
+            continue
+
+        # Build a lookup from the HTML tables: (row_label_lower, col_label_lower) → cell_value
+        cell_map: dict[tuple[str, str], float | None] = {}
+        for entry in entries:
+            html = entry.get("html") or ""
+            if not html:
+                continue
+            try:
+                parser = _TableHTMLParser()
+                parser.feed(html)
+                parser.close()
+            except Exception:
+                continue
+            if len(parser.rows) < 2:
+                continue
+            headers = parser.rows[0]
+            for row in parser.rows[1:]:
+                if not row:
+                    continue
+                rl = row[0].strip().lower()
+                for ci in range(1, min(len(row), len(headers))):
+                    cl = headers[ci].strip().lower()
+                    val = to_num(row[ci])
+                    cell_map[(rl, cl)] = val
+
+        if not cell_map:
+            continue
+
+        corrections = 0
+        for i, (rl, cl, val) in enumerate(zip(row_labels, col_labels, values, strict=False)):
+            if val is None or rl is None or cl is None:
+                continue
+            key = (str(rl).strip().lower(), str(cl).strip().lower())
+            if key not in cell_map:
+                continue
+            ground_truth = cell_map[key]
+            if ground_truth is None:
+                continue
+            # Allow small float tolerance (< 0.01% relative)
+            if val != 0 and abs(val - ground_truth) / abs(val) < 0.0001:
+                continue
+            if val != ground_truth:
+                corrections += 1
+                values[i] = ground_truth
+
+        if corrections > 0:
+            ex["values"] = values
+            ex["verification"] = f"corrected {corrections} values via ledger cross-check"
+            if verbose:
+                print(f"  Ledger cross-check [{dr_id}]: corrected {corrections} values")
+
+
+# ── Cohort aggregate filtering (post-extraction) ──────────────────────────
+
+_COHORT_AGGREGATE_RE = re.compile(
+    r"\btotal\b|\ball\s+other\b|\bgrand\s+total\b|\bsubtotal\b",
+    re.IGNORECASE,
+)
+
+_COHORT_OTHER_PREFIX_RE = re.compile(r"^other\s+", re.IGNORECASE)
+
+
+def _is_aggregate_label(label: str) -> bool:
+    """Check if a row label looks like an aggregate/total/regional summary."""
+    s = label.strip()
+    if _COHORT_AGGREGATE_RE.search(s):
+        return True
+    return bool(_COHORT_OTHER_PREFIX_RE.match(s))
+
+
+def _filter_cohort_aggregates(
+    extractions: dict,
+    data_requests: list[dict],
+    verbose: bool = False,
+) -> None:
+    """In-place: remove aggregate/total rows from cohort DR extractions.
+
+    For data_requests with cohort=True, filters out entries whose labels
+    match aggregate patterns (Total, All other, Other <region>, etc.).
+    Prevents max/min/argmax from picking summary rows instead of
+    individual entity rows. No-op when filtering would remove all rows.
+    """
+    for dr in data_requests:
+        if not dr.get("cohort"):
+            continue
+        dr_id = dr.get("id")
+        if not dr_id:
+            continue
+        ex = extractions.get(dr_id)
+        if not isinstance(ex, dict):
+            continue
+        values = ex.get("values") or []
+        labels = ex.get("labels") or []
+        if not labels or len(labels) != len(values):
+            continue
+
+        keep: list[int] = []
+        removed: list[str] = []
+        for i, label in enumerate(labels):
+            if _is_aggregate_label(str(label)):
+                removed.append(str(label))
+            else:
+                keep.append(i)
+
+        if not removed or not keep:
+            continue
+
+        ex["values"] = [values[i] for i in keep]
+        ex["labels"] = [labels[i] for i in keep]
+        if verbose:
+            print(f"  Cohort filter [{dr_id}]: removed {len(removed)} aggregate rows: {removed}")
+
+
+# ── Unit normalization (post-extraction) ───────────────────────────────────
+
+# Map the LLM's source_unit enum (and a few common variants) onto compute's
+# canonical unit keys ("thousands"/"millions"/"billions"/"percent"/"dollars").
+_LLM_UNIT_MAP: dict[str, str] = {
+    "thousands_usd": "thousands",
+    "thousand_usd": "thousands",
+    "thousands": "thousands",
+    "thousand": "thousands",
+    "millions_usd": "millions",
+    "million_usd": "millions",
+    "millions": "millions",
+    "million": "millions",
+    "billions_usd": "billions",
+    "billion_usd": "billions",
+    "billions": "billions",
+    "billion": "billions",
+    "usd": "dollars",
+    "dollars": "dollars",
+    "percent": "percent",
+    "%": "percent",
+}
+
+
+def _canonical_unit(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    return _LLM_UNIT_MAP.get(raw.strip().lower())
+
+
+# Phrases like "(in millions)", "nominal billions", "thousands of dollars"
+# inside a DR label tell us the unit the question wants the value in.
+_TARGET_UNIT_RE = re.compile(
+    r"\b(thousand[s]?|million[s]?|billion[s]?|trillion[s]?|percent|%)\b",
+    re.IGNORECASE,
+)
+
+
+def _infer_target_unit(dr: dict) -> str | None:
+    for field in ("label", "unit_hint", "description"):
+        text = dr.get(field) or ""
+        m = _TARGET_UNIT_RE.search(text)
+        if m:
+            return _canonical_unit(m.group(1))
+    return None
+
+
+def _normalize_extraction_units(
+    extractions: dict,
+    data_requests: list[dict],
+    spec: dict | None = None,
+    verbose: bool = False,
+) -> None:
+    """In-place: scale each DR's values from source_unit → target unit.
+
+    Box-cox, log, geometric mean, and any other non-scale-invariant op needs
+    its inputs in the unit the question is asking about. We can't fix this
+    after compute runs, so we fix it here, before compute sees the values.
+
+    No-op when source_unit is missing, target unit can't be inferred from the
+    DR label, or the units already match. Records `unit_normalized_from`
+    /`unit_normalized_to` on the extraction so downstream can audit.
+    """
+    from compute import convert_unit
+
+    # Spec-level fallback target unit (output_format.unit). Used when the DR
+    # label doesn't carry a unit phrase — common when decompose stores the
+    # target unit at the spec level instead of repeating it per DR.
+    spec_target = None
+    if spec:
+        of_unit = (spec.get("output_format") or {}).get("unit")
+        if of_unit:
+            spec_target = _canonical_unit(of_unit)
+
+    for dr in data_requests:
+        dr_id = dr.get("id")
+        if not dr_id:
+            continue
+        ex = extractions.get(dr_id)
+        if not isinstance(ex, dict):
+            continue
+        src = _canonical_unit(ex.get("source_unit"))
+        tgt = _infer_target_unit(dr) or spec_target
+        if not src or not tgt or src == tgt:
+            continue
+        if "dollars" in (src, tgt) and {src, tgt} != {"dollars"}:
+            # Treat raw dollars as a real scale: 1.0 vs 1e3/1e6/1e9.
+            from compute import UNIT_MULTIPLIERS
+
+            UNIT_MULTIPLIERS.setdefault("dollars", 1.0)
+        vals = ex.get("values") or []
+        new_vals = convert_unit(vals, src, tgt)
+        if new_vals is vals:
+            continue
+        ex["values"] = new_vals
+        ex["unit_normalized_from"] = src
+        ex["unit_normalized_to"] = tgt
+        if verbose:
+            print(f"  Unit-normalize {dr_id}: {src} → {tgt}")
 
 
 # ── CLI + Testing ────────────────────────────────────────────────────────────

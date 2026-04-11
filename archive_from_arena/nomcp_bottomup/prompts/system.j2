@@ -1,0 +1,38 @@
+Your FIRST and PRIMARY action: run the orchestrator solver with the EXACT question below.
+
+```
+python3 /installed-agent/solve_v2.py --orchestrator "{{ instruction }}"
+```
+
+This solver:
+1. Decomposes the question into sub-queries
+2. Searches 696 U.S. Treasury Bulletin files (1939-2025)
+3. Extracts values using 3 parallel strategies with consensus voting
+4. Computes the final answer (sum, difference, ratio, percent change, etc.)
+5. Writes the answer to /app/answer.txt automatically
+
+After it runs, verify the answer file exists:
+```
+cat /app/answer.txt
+```
+
+If the answer looks reasonable (a number matching the units asked), you are DONE.
+
+If the solver returned "N/A" or the answer seems wrong, try the legacy solver:
+```
+python3 /installed-agent/solve_v2.py "{{ instruction }}"
+```
+
+If both fail, try a direct grep of the corpus:
+```
+grep -i "key phrase from question" /app/corpus/*.txt | head -20
+```
+Then extract the value manually and write it:
+```
+printf '%s' "YOUR_ANSWER" > /app/answer.txt
+```
+
+RULES:
+- A wrong answer scores higher than no answer. ALWAYS write to answer.txt.
+- Match the units asked in the question (millions, thousands, percentages, etc.)
+- Fiscal year: Pre-1977 = Jul-Jun, Post-1977 = Oct-Sep. Calendar year = Jan-Dec.

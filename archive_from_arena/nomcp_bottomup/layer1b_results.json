@@ -1,0 +1,323 @@
+[
+  {
+    "uid": "PLAN_EASY_01",
+    "pass": true,
+    "plan_ok": true,
+    "answer_ok": true,
+    "plan_issues": [],
+    "computed_answer": 2602,
+    "expected_answer": 2602,
+    "plan": {
+      "search_keywords": [
+        "National defense",
+        "Expenditures",
+        "Fiscal year 1940",
+        "Treasury Bulletin"
+      ],
+      "table_type": "expenditures",
+      "metric_row": "National defense",
+      "years": [
+        1940
+      ],
+      "period": "fiscal",
+      "months_needed": "none",
+      "specific_months": [],
+      "values_to_extract": [
+        {
+          "year": 1940,
+          "month": null,
+          "description": "FY 1940 total - National defense"
+        }
+      ],
+      "computation": {
+        "type": "direct",
+        "description": "Extract the fiscal year 1940 total for National defense expenditures",
+        "formula": "value_from_table"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": 2,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "PLAN_MED_01",
+    "pass": true,
+    "plan_ok": true,
+    "answer_ok": true,
+    "plan_issues": [],
+    "computed_answer": 3928,
+    "expected_answer": 3928,
+    "plan": {
+      "search_keywords": [
+        "Treasury Bulletin expenditures national defense"
+      ],
+      "table_type": "expenditures",
+      "metric_row": "National defense",
+      "years": [
+        1940
+      ],
+      "period": "calendar",
+      "months_needed": "all_12",
+      "specific_months": [],
+      "values_to_extract": [
+        {
+          "year": 1940,
+          "month": 1,
+          "description": "January 1940 expenditures"
+        },
+        {
+          "year": 1940,
+          "month": 2,
+          "description": "February 1940 expenditures"
+        },
+        {
+          "year": 1940,
+          "month": 3,
+          "description": "March 1940 expenditures"
+        },
+        {
+          "year": 1940,
+          "month": 4,
+          "description": "April 1940 expenditures"
+        },
+        {
+          "year": 1940,
+          "month": 5,
+          "description": "May 1940 expenditures"
+        },
+        {
+          "year": 1940,
+          "month": 6,
+          "description": "June 1940 expenditures"
+        },
+        {
+          "year": 1940,
+          "month": 7,
+          "description": "July 1940 expenditures"
+        },
+        {
+          "year": 1940,
+          "month": 8,
+          "description": "August 1940 expenditures"
+        },
+        {
+          "year": 1940,
+          "month": 9,
+          "description": "September 1940 expenditures"
+        },
+        {
+          "year": 1940,
+          "month": 10,
+          "description": "October 1940 expenditures"
+        },
+        {
+          "year": 1940,
+          "month": 11,
+          "description": "November 1940 expenditures"
+        },
+        {
+          "year": 1940,
+          "month": 12,
+          "description": "December 1940 expenditures"
+        }
+      ],
+      "computation": {
+        "type": "sum_months",
+        "description": "Sum all 12 calendar months for 1940",
+        "formula": "sum(monthly_values)"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": 2,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "PLAN_MED_02",
+    "pass": false,
+    "plan_ok": false,
+    "answer_ok": false,
+    "plan_issues": [
+      "computation type: got 'absolute_difference', expected one of ['difference']"
+    ],
+    "computed_answer": null,
+    "expected_answer": 28,
+    "plan": {
+      "search_keywords": [
+        "total budget receipts",
+        "treasury bulletin"
+      ],
+      "table_type": "receipts",
+      "metric_row": "Total budget receipts",
+      "years": [
+        1949,
+        1950
+      ],
+      "period": "fiscal",
+      "months_needed": "none",
+      "specific_months": [],
+      "values_to_extract": [
+        {
+          "year": 1949,
+          "month": null,
+          "description": "FY 1949 total"
+        },
+        {
+          "year": 1950,
+          "month": null,
+          "description": "FY 1950 total"
+        }
+      ],
+      "computation": {
+        "type": "absolute_difference",
+        "description": "Absolute difference between FY 1950 and FY 1949 total receipts",
+        "formula": "abs(FY1950 - FY1949)"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": null,
+        "suffix": ""
+      }
+    }
+  },
+  {
+    "uid": "PLAN_MED_03",
+    "pass": false,
+    "plan_ok": true,
+    "answer_ok": false,
+    "plan_issues": [],
+    "computed_answer": null,
+    "expected_answer": 0.07,
+    "plan": {
+      "search_keywords": [
+        "budget receipts total",
+        "receipts table",
+        "federal receipts"
+      ],
+      "table_type": "receipts",
+      "metric_row": "Total receipts",
+      "years": [
+        1949,
+        1950
+      ],
+      "period": "fiscal",
+      "months_needed": "none",
+      "specific_months": [],
+      "values_to_extract": [
+        {
+          "year": 1949,
+          "month": null,
+          "description": "FY 1949 total receipts"
+        },
+        {
+          "year": 1950,
+          "month": null,
+          "description": "FY 1950 total receipts"
+        }
+      ],
+      "computation": {
+        "type": "percent_change",
+        "description": "Absolute percent change from FY 1949 to FY 1950",
+        "formula": "abs((FY1950 - FY1949) / FY1949) * 100"
+      },
+      "output_format": {
+        "units": "percent",
+        "rounding": 2,
+        "suffix": "%"
+      }
+    }
+  },
+  {
+    "uid": "PLAN_HARD_01",
+    "pass": true,
+    "plan_ok": true,
+    "answer_ok": true,
+    "plan_issues": [],
+    "computed_answer": 93.89,
+    "expected_answer": null,
+    "plan": {
+      "search_keywords": [
+        "Treasury Bulletin",
+        "expenditures",
+        "national defense"
+      ],
+      "table_type": "expenditures",
+      "metric_row": "National defense",
+      "years": [
+        1940,
+        1953
+      ],
+      "period": "calendar",
+      "months_needed": "all_12",
+      "specific_months": [],
+      "values_to_extract": [
+        {
+          "year": 1940,
+          "month": null,
+          "description": "Calendar year 1940 total (sum of 12 months)"
+        },
+        {
+          "year": 1953,
+          "month": null,
+          "description": "Calendar year 1953 total (sum of 12 months)"
+        }
+      ],
+      "computation": {
+        "type": "percent_change",
+        "description": "Absolute percent change between 1940 and 1953 total defense expenditures",
+        "formula": "abs((sum_1953 - sum_1940) / sum_1940) * 100"
+      },
+      "output_format": {
+        "units": "millions",
+        "rounding": 2,
+        "suffix": "%"
+      }
+    }
+  },
+  {
+    "uid": "PLAN_UNIT_01",
+    "pass": false,
+    "plan_ok": true,
+    "answer_ok": false,
+    "plan_issues": [],
+    "computed_answer": null,
+    "expected_answer": 4.14,
+    "plan": {
+      "search_keywords": [
+        "long-term bond yield",
+        "Treasury Bulletin yields",
+        "nominal bond yield"
+      ],
+      "table_type": "yields",
+      "metric_row": "Nominal long-term bond yield",
+      "years": [
+        1963
+      ],
+      "period": "calendar",
+      "months_needed": "specific",
+      "specific_months": [
+        12
+      ],
+      "values_to_extract": [
+        {
+          "year": 1963,
+          "month": 12,
+          "description": "December 1963 nominal long-term bond yield"
+        }
+      ],
+      "computation": {
+        "type": "direct",
+        "description": "Extract the December 1963 nominal long-term bond yield value",
+        "formula": "value"
+      },
+      "output_format": {
+        "units": "percent",
+        "rounding": 2,
+        "suffix": "%"
+      }
+    }
+  }
+]

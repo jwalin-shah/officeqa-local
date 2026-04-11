@@ -128,6 +128,118 @@ def test_execute_percent_change():
     assert execute(spec, extractions) == 25.0
 
 
+# ── Enum dispatcher ─────────────────────────────────────────────────────────
+
+
+def _dispatch_spec(op, n_drs=1, **extra):
+    spec = {
+        "computation": op,
+        "data_requests": [{"id": f"v{i + 1}"} for i in range(n_drs)],
+        "computation_spec": {"python_template": "result = None  # should not run"},
+    }
+    spec.update(extra)
+    return spec
+
+
+def test_dispatch_direct():
+    spec = _dispatch_spec("direct")
+    assert execute(spec, {"v1": {"values": [42]}}) == 42.0
+
+
+def test_dispatch_sum():
+    spec = _dispatch_spec("sum")
+    assert execute(spec, {"v1": {"values": [1, 2, 3, 4]}}) == 10.0
+
+
+def test_dispatch_difference():
+    spec = _dispatch_spec("difference", n_drs=2)
+    ex = {"v1": {"values": [100]}, "v2": {"values": [250]}}
+    assert execute(spec, ex) == 150.0
+
+
+def test_dispatch_percent_change():
+    spec = _dispatch_spec("percent_change", n_drs=2)
+    ex = {"v1": {"values": [200]}, "v2": {"values": [250]}}
+    assert execute(spec, ex) == 25.0
+
+
+def test_dispatch_ratio():
+    spec = _dispatch_spec("ratio", n_drs=2)
+    assert execute(spec, {"v1": {"values": [10]}, "v2": {"values": [4]}}) == 2.5
+
+
+def test_dispatch_average():
+    assert execute(_dispatch_spec("average"), {"v1": {"values": [10, 20, 30]}}) == 20.0
+
+
+def test_dispatch_max_min():
+    assert execute(_dispatch_spec("max"), {"v1": {"values": [5, 12, 3]}}) == 12.0
+    assert execute(_dispatch_spec("min"), {"v1": {"values": [5, 12, 3]}}) == 3.0
+
+
+def test_dispatch_argmax_with_labels():
+    spec = _dispatch_spec("argmax")
+    ex = {"v1": {"values": [10, 50, 20], "labels": ["A", "B", "C"]}}
+    assert execute(spec, ex) == "B"
+
+
+def test_dispatch_linear_regression():
+    spec = {
+        "computation": "linear_regression",
+        "data_requests": [{"id": "v1", "years": [2000, 2001, 2002, 2003]}],
+        "computation_spec": {"python_template": "result = None"},
+    }
+    ex = {"v1": {"values": [10, 20, 30, 40]}}
+    result = execute(spec, ex)
+    assert isinstance(result, list) and len(result) == 2
+    assert abs(result[0] - 10.0) < 1e-6  # slope
+    assert abs(result[1] - (-19990.0)) < 1e-3  # intercept at x=0
+
+
+def test_dispatch_cagr():
+    # 100 → 200 over 10 years → ~7.1773%
+    spec = {
+        "computation": "cagr",
+        "data_requests": [
+            {"id": "v1", "years": [2000]},
+            {"id": "v2", "years": [2010]},
+        ],
+        "computation_spec": {"python_template": "result = None"},
+    }
+    ex = {"v1": {"values": [100]}, "v2": {"values": [200]}}
+    assert abs(execute(spec, ex) - 7.17734625) < 1e-4
+
+
+def test_dispatch_gini():
+    spec = _dispatch_spec("gini")
+    # Equal distribution → 0
+    assert abs(execute(spec, {"v1": {"values": [1, 1, 1, 1]}})) < 1e-9
+
+
+def test_dispatch_unknown_op_falls_back_to_template():
+    spec = {
+        "computation": "custom",
+        "data_requests": [{"id": "v1"}],
+        "computation_spec": {"python_template": "result = values['v1'][0] * 7"},
+    }
+    assert execute(spec, {"v1": {"values": [6]}}) == 42
+
+
+def test_dispatch_aliases():
+    # "mean" aliases to "average"
+    assert execute(_dispatch_spec("mean"), {"v1": {"values": [10, 20]}}) == 15.0
+    # "correlation" aliases to pearson_correlation
+    spec = _dispatch_spec("correlation", n_drs=2)
+    ex = {"v1": {"values": [1, 2, 3]}, "v2": {"values": [2, 4, 6]}}
+    assert abs(execute(spec, ex) - 1.0) < 1e-9
+
+
+def test_dispatch_difference_raises_on_empty():
+    spec = _dispatch_spec("difference", n_drs=2)
+    with pytest.raises(ComputeError, match="need two non-empty"):
+        execute(spec, {"v1": {"values": [5]}, "v2": {"values": []}})
+
+
 # ── Sandbox security ─────────────────────────────────────────────────────────
 
 

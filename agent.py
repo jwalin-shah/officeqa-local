@@ -4,13 +4,13 @@ OfficeQA Local Agent
 Orchestrator for answering U.S. Treasury Bulletin questions using DeepSeek via Dedalus.
 """
 
+import json
 import os
 import subprocess
-import re
-import json
 from pathlib import Path
-from dotenv import load_dotenv
+
 import openai
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -112,7 +112,7 @@ class TreasuryAgent:
                 )
                 if output.stdout:
                     results.append(f"=== {file_path.name} ===\n{output.stdout}")
-            except Exception as e:
+            except Exception:
                 continue
 
         return "\n".join(results) if results else "No matches found."
@@ -145,7 +145,7 @@ class TreasuryAgent:
         self.conversation_history.append({"role": "user", "content": question})
 
         # Agentic loop
-        for iteration in range(10):  # Max 10 iterations
+        for _iteration in range(10):  # Max 10 iterations
             try:
                 response = openai.ChatCompletion.create(
                     model=MODEL,

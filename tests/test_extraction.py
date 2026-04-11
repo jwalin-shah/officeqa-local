@@ -7,6 +7,11 @@ from unittest.mock import MagicMock, patch
 
 from extract import (
     _detect_month_index,
+    _disambiguate_row_labels,
+    _ensure_year_coverage,
+    _filter_cohort_aggregates,
+    _is_aggregate_label,
+    _verify_against_ledger,
     build_context_from_entries,
     clean_value,
     filter_cy_rows,
@@ -1799,3 +1804,432 @@ def test_run_extract_and_compute_skips_llm_when_all_resolved():
     # LLM should NOT be called when there are no unresolved DRs
     mock_llm.assert_not_called()
     assert answer == "1580"
+
+
+# ── Cohort aggregate filtering ──────────────────────────────────────────────
+
+
+class TestIsAggregateLabel:
+    def test_total_variations(self):
+        assert _is_aggregate_label("Total") is True
+        assert _is_aggregate_label("Total Europe") is True
+        assert _is_aggregate_label("1955 Total") is True
+        assert _is_aggregate_label("February Total") is True
+        assert _is_aggregate_label("Grand total") is True
+        assert _is_aggregate_label("Subtotal") is True
+
+    def test_other_prefix(self):
+        assert _is_aggregate_label("Other Europe") is True
+        assert _is_aggregate_label("Other Latin America and Caribbean") is True
+
+    def test_all_other(self):
+        assert _is_aggregate_label("All other") is True
+        assert _is_aggregate_label("All Other Asia") is True
+
+    def test_non_aggregate(self):
+        assert _is_aggregate_label("Austria") is False
+        assert _is_aggregate_label("United Kingdom") is False
+        assert _is_aggregate_label("Defense Department") is False
+        assert _is_aggregate_label("1955 Defense Department") is False
+        assert _is_aggregate_label("Department of the Treasury") is False
+
+
+class TestFilterCohortAggregates:
+    def test_filters_totals_from_cohort(self):
+        """UID0012 scenario: remove Total rows, keep department rows."""
+        extractions = {
+            "v1": {
+                "values": [79223, 40000, 36080, 5000],
+                "labels": [
+                    "1955 Total",
+                    "February Total",
+                    "1955 Defense Department",
+                    "1955 Agriculture Department",
+                ],
+            }
+        }
+        drs = [{"id": "v1", "cohort": True}]
+        _filter_cohort_aggregates(extractions, drs)
+        assert extractions["v1"]["values"] == [36080, 5000]
+        assert extractions["v1"]["labels"] == [
+            "1955 Defense Department",
+            "1955 Agriculture Department",
+        ]
+
+    def test_filters_regional_aggregates(self):
+        """UID0006 scenario: remove regional aggregates, keep countries."""
+        extractions = {
+            "v1": {
+                "values": [229314, 103375, 50000, 20000],
+                "labels": [
+                    "Total Europe",
+                    "United Kingdom",
+                    "Other Europe",
+                    "France",
+                ],
+            }
+        }
+        drs = [{"id": "v1", "cohort": True}]
+        _filter_cohort_aggregates(extractions, drs)
+        assert extractions["v1"]["values"] == [103375, 20000]
+        assert extractions["v1"]["labels"] == ["United Kingdom", "France"]
+
+    def test_noop_when_not_cohort(self):
+        """Non-cohort DRs are left unchanged."""
+        extractions = {
+            "v1": {
+                "values": [100, 200],
+                "labels": ["Total", "Defense"],
+            }
+        }
+        drs = [{"id": "v1", "cohort": False}]
+        _filter_cohort_aggregates(extractions, drs)
+        assert extractions["v1"]["values"] == [100, 200]
+
+    def test_noop_when_all_would_be_removed(self):
+        """Safety: don't filter if it would leave zero rows."""
+        extractions = {
+            "v1": {
+                "values": [100, 200],
+                "labels": ["Total A", "Total B"],
+            }
+        }
+        drs = [{"id": "v1", "cohort": True}]
+        _filter_cohort_aggregates(extractions, drs)
+        assert extractions["v1"]["values"] == [100, 200]
+
+    def test_noop_when_no_labels(self):
+        """Graceful no-op when labels are missing."""
+        extractions = {
+            "v1": {
+                "values": [100, 200],
+            }
+        }
+        drs = [{"id": "v1", "cohort": True}]
+        _filter_cohort_aggregates(extractions, drs)
+        assert extractions["v1"]["values"] == [100, 200]
+
+
+# ── Multi-year entry coverage ───────────────────────────────────────────────
+
+
+class TestEnsureYearCoverage:
+    def test_promotes_uncovered_years(self):
+        """Entries covering new years should be promoted to front."""
+        entries = [
+            {"years": [1984], "file": "a"},
+            {"years": [1984], "file": "b"},
+            {"years": [1985], "file": "c"},
+            {"years": [1986], "file": "d"},
+            {"years": [1986], "file": "e"},
+        ]
+        result = _ensure_year_coverage(entries, {1984, 1985, 1986})
+        # First 3 entries should each cover a distinct year
+        files = [e["file"] for e in result]
+        assert files[0] == "a"  # first entry for 1984
+        assert files[1] == "c"  # first entry for 1985
+        assert files[2] == "d"  # first entry for 1986
+        assert set(files[3:]) == {"b", "e"}  # rest
+
+    def test_noop_single_year(self):
+        entries = [{"years": [1984], "file": "a"}, {"years": [1984], "file": "b"}]
+        result = _ensure_year_coverage(entries, {1984})
+        assert result is entries  # same object, no change
+
+    def test_noop_empty(self):
+        assert _ensure_year_coverage([], {1984, 1985}) == []
+
+    def test_multi_year_entry(self):
+        """An entry covering multiple years satisfies all of them."""
+        entries = [
+            {"years": [1984, 1985, 1986], "file": "a"},
+            {"years": [1987], "file": "b"},
+        ]
+        result = _ensure_year_coverage(entries, {1984, 1985, 1986, 1987})
+        files = [e["file"] for e in result]
+        assert files[0] == "a"  # covers 1984-1986
+        assert files[1] == "b"  # covers 1987
+
+
+# ── Rendering parameter threading ───────────────────────────────────────────
+
+
+class TestRenderingParameters:
+    def test_render_entry_max_rows(self):
+        """render_entry should respect max_rows parameter."""
+        rows = "".join(f"<tr><td>Row {i}</td><td>{i}</td></tr>" for i in range(100))
+        html = f"<table><tr><th>Label</th><th>Value</th></tr>{rows}</table>"
+        entry = {"file": "test.json", "html": html}
+
+        short = render_entry(entry, max_rows=5)
+        long = render_entry(entry, max_rows=50)
+        assert len(short) < len(long)
+        assert "truncated" in short
+
+    def test_render_entry_vertical_threshold(self):
+        """Setting vertical_threshold=999 forces pipe format."""
+        cols = "".join(f"<th>Col{i}</th>" for i in range(12))
+        cells = "".join(f"<td>{i}</td>" for i in range(12))
+        html = f"<table><tr>{cols}</tr><tr>{cells}</tr></table>"
+        entry = {"file": "test.json", "html": html}
+
+        # Default threshold=8 should trigger vertical for 12 cols
+        vert = render_entry(entry, vertical_threshold=8)
+        assert "ROW:" in vert
+
+        # threshold=999 should force pipe
+        pipe = render_entry(entry, vertical_threshold=999)
+        assert "|" in pipe
+        assert "ROW:" not in pipe
+
+    def test_build_context_threads_render_options(self):
+        """build_context_from_entries passes render options through."""
+        cols = "".join(f"<th>Col{i}</th>" for i in range(12))
+        cells = "".join(f"<td>{i}</td>" for i in range(12))
+        html = f"<table><tr>{cols}</tr><tr>{cells}</tr></table>"
+        entries = [{"file": "test.json", "html": html}]
+
+        vert = build_context_from_entries(entries, vertical_threshold=8)
+        pipe = build_context_from_entries(entries, vertical_threshold=999)
+        assert "ROW:" in vert
+        assert "ROW:" not in pipe
+
+
+# ── page_id and prose rendering ─────────────────────────────────────────────
+
+
+class TestPageIdAndProse:
+    def test_page_id_in_render(self):
+        """page_id should appear in rendered header."""
+        entry = {
+            "file": "test.json",
+            "element_id": 5,
+            "page_id": 42,
+            "html": "<table><tr><th>A</th></tr><tr><td>1</td></tr></table>",
+        }
+        result = render_entry(entry)
+        assert "[page 42]" in result
+
+    def test_prose_entry_render(self):
+        """Prose entries (content, no html) should render their text."""
+        entry = {
+            "file": "bulletin_1982_08.json",
+            "page_id": 13,
+            "html": "",
+            "content": "Tenders totaled $10,102 million for 2-year notes.",
+        }
+        result = render_entry(entry)
+        assert "10,102" in result
+        assert "[page 13]" in result
+
+    def test_prose_entry_no_content_no_html(self):
+        """Entry with neither html nor content returns empty."""
+        entry = {"file": "test.json", "html": "", "content": ""}
+        result = render_entry(entry)
+        assert result == ""
+
+
+# ── CPI annual average resolution ──────────────────────────────────────────
+
+
+class TestCpiResolution:
+    def test_cpi_uses_published_annual(self):
+        """CPI resolution should use BLS published annual averages, not
+        computed monthly averages."""
+        from extract import _resolve_external_dr
+
+        dr = {"source": "cpi", "years": [1940]}
+        result = _resolve_external_dr(dr)
+        assert result is not None
+        # BLS published annual average for 1940 is 14.0
+        assert result[0] == 14.0
+
+    def test_cpi_1953(self):
+        from extract import _resolve_external_dr
+
+        dr = {"source": "cpi", "years": [1953]}
+        result = _resolve_external_dr(dr)
+        assert result is not None
+        # BLS published annual average for 1953 is 26.7
+        assert result[0] == 26.7
+
+
+# ── External FX data ────────────────────────────────────────────────────────
+
+
+class TestExternalFx:
+    def test_fx_jpy_resolution(self):
+        from external_data import resolve_fx_dr
+
+        dr = {
+            "source": "fx",
+            "label": "USD/JPY exchange rate on March 31, 2025",
+            "years": [2025],
+            "start_month": 3,
+        }
+        result = resolve_fx_dr(dr)
+        assert result is not None
+        assert result[0] == 149.98
+
+    def test_fx_unknown_currency(self):
+        from external_data import resolve_fx_dr
+
+        dr = {"source": "fx", "label": "exchange rate", "years": [2025]}
+        result = resolve_fx_dr(dr)
+        assert result is None
+
+    def test_fx_gbp_resolution(self):
+        from external_data import resolve_fx_dr
+
+        dr = {
+            "source": "fx",
+            "label": "GBP/USD exchange rate on March 16, 2016",
+            "years": [2016],
+        }
+        result = resolve_fx_dr(dr)
+        assert result is not None
+        assert result[0] == 0.7076
+
+    def test_fx_cache_hit(self):
+        """Static cache entries should be returned without network."""
+        from external_data import FX_CACHE, lookup_fx
+
+        FX_CACHE[("usd", "test", 2000, 1, 1)] = 42.0
+        assert lookup_fx("USD", "TEST", 2000, 1, 1) == 42.0
+        del FX_CACHE[("usd", "test", 2000, 1, 1)]
+
+
+# ── Ledger cross-check ──────────────────────────────────────────────────────
+
+
+class TestLedgerCrossCheck:
+    def _make_entry(self, headers, rows):
+        """Build an entry dict with HTML from header/row lists."""
+        html = "<table>"
+        html += "<tr>" + "".join(f"<th>{h}</th>" for h in headers) + "</tr>"
+        for row in rows:
+            html += "<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>"
+        html += "</table>"
+        return {"file": "test.json", "html": html}
+
+    def test_corrects_wrong_value(self):
+        """When LLM returns wrong value but correct coordinates, fix it."""
+        entry = self._make_entry(
+            ["Category", "1940"],
+            [["Defense", "1580"], ["Veterans", "507"]],
+        )
+        extractions = {
+            "v1": {
+                "values": [1590],  # wrong
+                "labels": ["1940"],
+                "row_labels": ["Defense"],
+                "col_labels": ["1940"],
+            }
+        }
+        drs = [{"id": "v1"}]
+        _verify_against_ledger(extractions, drs, {"v1": [entry]})
+        assert extractions["v1"]["values"] == [1580]
+        assert "corrected" in extractions["v1"].get("verification", "")
+
+    def test_no_correction_when_matching(self):
+        """Correct values should not be modified."""
+        entry = self._make_entry(
+            ["Category", "1940"],
+            [["Defense", "1580"]],
+        )
+        extractions = {
+            "v1": {
+                "values": [1580],
+                "labels": ["1940"],
+                "row_labels": ["Defense"],
+                "col_labels": ["1940"],
+            }
+        }
+        drs = [{"id": "v1"}]
+        _verify_against_ledger(extractions, drs, {"v1": [entry]})
+        assert extractions["v1"]["values"] == [1580]
+        assert "verification" not in extractions["v1"]
+
+    def test_no_crash_without_coordinates(self):
+        """Extractions without row_labels/col_labels are silently skipped."""
+        extractions = {
+            "v1": {
+                "values": [1580],
+                "labels": ["1940"],
+            }
+        }
+        drs = [{"id": "v1"}]
+        _verify_against_ledger(extractions, drs, {"v1": []})
+        assert extractions["v1"]["values"] == [1580]
+
+
+# ── Row label disambiguation ────────────────────────────────────────────────
+
+
+class TestDisambiguateRowLabels:
+    def test_bare_months_get_year_prefix(self):
+        """UID0005 scenario: '1939-December' then bare months become 1940-*."""
+        rows = [
+            ["Category", "Value"],
+            ["1939-December", "125"],
+            ["January", "132"],
+            ["February", "129"],
+            ["December", "473"],
+        ]
+        result = _disambiguate_row_labels(rows)
+        assert result[0] == ["Category", "Value"]  # header unchanged
+        assert result[1] == ["1939-December", "125"]  # year-prefixed unchanged
+        assert result[2][0] == "1940-January"
+        assert result[3][0] == "1940-February"
+        assert result[4][0] == "1940-December"
+
+    def test_mid_year_start(self):
+        """'1940-June' then bare months continue as 1940-*."""
+        rows = [
+            ["Category", "Value"],
+            ["1940-June", "100"],
+            ["July", "200"],
+            ["August", "300"],
+        ]
+        result = _disambiguate_row_labels(rows)
+        assert result[2][0] == "1940-July"
+        assert result[3][0] == "1940-August"
+
+    def test_no_year_prefix_no_change(self):
+        """Rows without a year-prefixed row are left unchanged."""
+        rows = [
+            ["Category", "Value"],
+            ["January", "100"],
+            ["February", "200"],
+        ]
+        result = _disambiguate_row_labels(rows)
+        assert result[1][0] == "January"
+        assert result[2][0] == "February"
+
+    def test_bare_year_resets_tracking(self):
+        """A bare '1941' row should reset year tracking."""
+        rows = [
+            ["Category", "Value"],
+            ["1939-December", "125"],
+            ["January", "132"],
+            ["1941", "2602"],
+            ["January", "200"],
+        ]
+        result = _disambiguate_row_labels(rows)
+        assert result[2][0] == "1940-January"
+        assert result[3] == ["1941", "2602"]
+        assert result[4][0] == "January"  # no year context after bare year
+
+    def test_integrated_in_pipe_text(self):
+        """html_to_pipe_text should produce disambiguated labels."""
+        html = (
+            "<table>"
+            "<tr><th>Month</th><th>Defense</th></tr>"
+            "<tr><td>1939-December</td><td>125</td></tr>"
+            "<tr><td>January</td><td>132</td></tr>"
+            "<tr><td>February</td><td>129</td></tr>"
+            "</table>"
+        )
+        result = html_to_pipe_text(html)
+        assert "1940-January" in result
+        assert "1940-February" in result

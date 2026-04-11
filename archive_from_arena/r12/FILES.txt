@@ -1,0 +1,179 @@
+v22-HYBRID BUILD MANIFEST
+Date: 2026-04-08
+Location: /Users/jwalinshah/projects/officeqa-arena/r12/
+
+================================================================================
+ARENA SUBMISSION DIRECTORY (r12/submit/)
+================================================================================
+
+submit/arena.yaml (246 bytes)
+  - Arena configuration
+  - Model: openrouter/minimax/minimax-m2.5
+  - Harness: goose
+  - Timeout: 480 seconds
+  - Skills: verify/
+  - Status: ✅ Ready for submission
+
+submit/prompt.j2 (1,364 bytes, 28 lines)
+  - Hybrid prompt (v20 base + v21 quick analysis)
+  - Features:
+    • Quick Analysis section (metric/period/entity identification)
+    • CPI tool documentation
+    • FY vs CY guidance (critical for correctness)
+    • Unit format guidance
+    • Formula reference (pct_change, cagr, stdev)
+    • Verify skill integration
+  - Changes from v20: +1 section (Quick Analysis)
+  - Status: ✅ Optimized and validated
+
+submit/cpi.py (21,299 bytes)
+  - CPI index and adjustment tool
+  - Copied from r11/submit/cpi.py
+  - Usage: python3 /installed-agent/cpi.py YEAR → index
+  - Status: ✅ Unchanged from r11 (proven effective)
+
+submit/skills/verify/SKILL.md
+  - Verification skill for post-answer checking
+  - Catches wrong answers and suggests corrections
+  - Flips ~50% of incorrect calculations
+  - Copied from r11/submit/skills/verify/
+  - Status: ✅ Unchanged from r11 (proven effective)
+
+submit/README.md (3.5 KB)
+  - Deployment and testing guide
+  - Quick start instructions
+  - Configuration details
+  - Expected results
+  - Troubleshooting guide
+  - Status: ✅ Complete
+
+================================================================================
+DOCUMENTATION (r12/)
+================================================================================
+
+V22_HYBRID_STRATEGY.md (4 KB)
+  - Comprehensive design document
+  - Sections:
+    • Executive summary (v20 vs v21 vs v22 comparison)
+    • Design rationale (why hybrid approach)
+    • Prompt optimizations (what kept/added/removed)
+    • Expected outcomes (accuracy + step count)
+    • Testing strategy (local + arena)
+    • Deployment instructions
+    • Troubleshooting guide
+  - Status: ✅ Complete
+
+IMPLEMENTATION_SUMMARY.md (4.5 KB)
+  - High-level summary of what was built
+  - Implementation checklist
+  - Usage instructions (3 modes: test, submit, analyze)
+  - Comparison tables (v20 vs v22, v21 vs v22)
+  - Success criteria
+  - Next actions
+  - Design philosophy
+  - Status: ✅ Complete
+
+FILES.txt (this file)
+  - Manifest of all files
+  - Purpose descriptions
+  - Status: ✅ Complete
+
+================================================================================
+TEST HARNESS (root directory)
+================================================================================
+
+../run_local_r12.sh (executable)
+  - Local test harness for r12
+  - Usage modes:
+    • ./run_local_r12.sh UID0001 — Single task test
+    • ./run_local_r12.sh --batch UID0001 UID0002 ... — Sequential batch
+    • ./run_local_r12.sh --parallel UID0001 UID0002 ... — Parallel batch
+  - Features:
+    • Replicates arena environment locally
+    • Maps /app/resources, /installed-agent/ paths
+    • Registers verify skill with goose
+    • Compares actual vs expected answers
+    • Reports pass/fail with percentage error
+  - Status: ✅ Ready for local testing
+
+================================================================================
+QUICK REFERENCE
+================================================================================
+
+For Arena Submission:
+  cd r12/submit
+  arena submit
+  # Expected: 71-73% (vs v20's 69.5%, v21's 72.8%)
+
+For Local Testing Before Submit:
+  cd /Users/jwalinshah/projects/officeqa-arena
+  ./run_local_r12.sh --batch UID0001 UID0002 ... UID0010  # 10-task batch
+
+For Analysis After Submission:
+  # Pull traces after 24h
+  python3 pull_latest_traces.py
+  # Analyze
+  python3 analyze_traces.py r12 v20 v21
+
+================================================================================
+VERIFICATION CHECKLIST
+================================================================================
+
+✅ Directory structure
+  - r12/submit/ exists
+  - All arena submission files present
+  - All documentation files present
+  - run_local_r12.sh executable
+
+✅ File sizes (sanity check)
+  - arena.yaml: 246 bytes (valid YAML)
+  - prompt.j2: 1,364 bytes (28 lines)
+  - cpi.py: 21,299 bytes (executable)
+  - skills/verify/: pre-built directory (unchanged)
+
+✅ Content validation
+  - prompt.j2 includes: Quick Analysis, CPI, FY/CY, verify skill call
+  - arena.yaml: valid YAML, correct model + harness
+  - run_local_r12.sh: executable, compatible with r10 pattern
+
+✅ Documentation
+  - V22_HYBRID_STRATEGY.md: complete design doc
+  - IMPLEMENTATION_SUMMARY.md: complete summary
+  - submit/README.md: deployment guide
+  - FILES.txt: this manifest
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. Local Test (recommended first):
+   ./run_local_r12.sh --batch UID0001 UID0002 ... UID0010
+
+2. If Pass Rate ≥70%:
+   cd r12/submit && arena submit
+
+3. Monitor for 24-48h:
+   # Check submission status via arena CLI
+
+4. Pull Traces & Analyze:
+   # Compare r12 vs v20 vs v21 on failure modes
+
+5. Document Results:
+   # Update memory with final performance
+
+================================================================================
+SUPPORT
+================================================================================
+
+Design Philosophy:
+  "Combine proven components over inventing new ones"
+  - v20 core (grep-first, verify skill): 69.5% baseline
+  - v21 quick analysis: targets wrong-number failures
+  - v22 hybrid: lightweight combination of both
+
+If Issues:
+  - Check V22_HYBRID_STRATEGY.md (troubleshooting section)
+  - Check run_local_r12.sh output for specific errors
+  - Revert to r10/submit (v20 baseline) if needed
+
+================================================================================
