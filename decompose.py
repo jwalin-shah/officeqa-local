@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 """
+OLD ARENA ARTIFACT — DO NOT USE IN THE ACTIVE PIPELINE.
+
+This file is a legacy arena-era script that uses the OpenRouter API and a
+different decomposition schema. The active `decompose()` function used by
+the current solver lives inside solve.py. Do not import from this file.
+Reference only.
+
+Original description:
 V3: Decompose all 246 questions with critical fixes for:
 1. CY Annual Total Mismatch (42 cases)
 2. Sum/Total Computation Error (25 cases)
