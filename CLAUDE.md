@@ -92,7 +92,7 @@ legacy fallback; prefer the JSON corpus for all new code.
 - `ledger.sqlite` — SQLite database built from corpus_json/; stores normalized cells, tables, prose, footnotes, and derived views for retrieval.
 
 ### Archive
-`archive_from_arena/` contains historical code from previous arena competitions: analysis tools (`analyst/`), experimental approaches (`nomcp_bottomup/`, `nomcp/`), solver snapshots (`commit_snapshots/`), and older iterations (`r10/`, `r11/`, `r12/`, `v14/`, `officeqa_mcp/`). Do not merge into the active pipeline — reference only.
+Historical arena code has been removed from the repo (was `archive_from_arena/`, removed 2026-04-11 as part of repo cleanup). If you need to reference it, `git log --all --full-history -- archive_from_arena/` will find the last commit that contained it.
 
 ## Key conventions
 - LLM: OpenAI client library with DeepSeek via Dedalus (OpenAI-compatible endpoint). Model via

@@ -2,8 +2,6 @@
 # These are reference material or one-off scripts, not the active pipeline.
 exclude: |
   (?x)^(
-    archive_from_arena/.*|
-    analyze_arena_traces\.py|
     analyze_retrieve_misses\.py|
     eval_agent_fallback\.py|
     eval_agent_full\.py|

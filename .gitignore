@@ -20,7 +20,11 @@ token.json
 # --- Local agent / tool state ---
 .claude/
 .tldr/
+.factory/
 CLAUDE.md.new
+
+# --- Legacy arena code (removed from tree 2026-04-11) ---
+archive_from_arena/
 
 # --- Corpus (large, regenerable from source) ---
 corpus_json/

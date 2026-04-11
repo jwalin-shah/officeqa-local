@@ -21,9 +21,7 @@ dependencies = [
 line-length = 100
 target-version = "py312"
 extend-exclude = [
-    "archive_from_arena",
     # Analysis / eval scratch scripts — not production code paths
-    "analyze_arena_traces.py",
     "analyze_retrieve_misses.py",
     "eval_agent_fallback.py",
     "eval_agent_full.py",
@@ -58,7 +56,6 @@ addopts = "--cov=. --cov-report=term-missing"
 exclude_dirs = [
     ".venv",
     "tests",
-    "archive_from_arena",
 ]
 # B307 safe eval with restricted builtins in find.py (documented)
 # B310 urllib.urlopen on trusted fixed URLs

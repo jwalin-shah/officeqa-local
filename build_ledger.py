@@ -1749,9 +1749,8 @@ def normalize_metric_slug(metric: str | None) -> str:
     """Normalize a row/metric label the way the arena's master_ledger did.
 
     Lowercase, strip footnote markers like '1/', strip punctuation except
-    hyphens, collapse whitespace. Matches the regex in
-    archive_from_arena/analyst/solve.py::_normalize_metric_slug so slugs
-    are comparable to the arena's vocabulary.
+    hyphens, collapse whitespace. Matches the arena's historical
+    _normalize_metric_slug regex so slugs are comparable to its vocabulary.
     """
     if not metric:
         return ""

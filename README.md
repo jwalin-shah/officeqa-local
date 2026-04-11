@@ -77,7 +77,6 @@ uv run python extract.py --test-oracle --n 20
 
 ## Repo Notes
 
-- `archive_from_arena/` is reference material only.
 - `retrieve_v2.py` is the canonical retrieval implementation.
 - `ledger.sqlite` and evaluation artifacts are large; keep a clear distinction between code and generated outputs.
 - The project should first become excellent on OfficeQA before being generalized to other benchmarks.
