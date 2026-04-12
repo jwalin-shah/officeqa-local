@@ -1009,6 +1009,14 @@ def _extract_hints(plan: dict | None, question: str) -> list[dict]:
                 tys.append(int(y))
         if not tys:
             tys = question_years
+        rh = req.get("retrieval_hint") or {}
+        channel_pref = (rh.get("channel_preference") or "auto").strip().lower()
+        if channel_pref not in {"metric_exact", "fts_keyword", "prose", "auto"}:
+            channel_pref = "auto"
+        must_match = [
+            str(p).strip() for p in (rh.get("must_match_phrases") or []) if str(p).strip()
+        ]
+        avoid = [str(p).strip() for p in (rh.get("avoid_phrases") or []) if str(p).strip()]
         hints.append(
             {
                 "metric": metric,
@@ -1018,6 +1026,9 @@ def _extract_hints(plan: dict | None, question: str) -> list[dict]:
                 "years": tys,
                 "granularity": (req.get("granularity") or "").strip(),
                 "source": (req.get("source") or "").strip(),
+                "channel_preference": channel_pref,
+                "must_match_phrases": must_match,
+                "avoid_phrases": avoid,
             }
         )
     return hints
@@ -1720,6 +1731,21 @@ class _RetrievalContext:
         self.all_target_years: set[int] = set()
         self.corpus_row_hints: list[str] = []
         self.requested_granularities: set[str] = set()
+        self.channel_preferences: list[str] = []
+        self.must_match_phrases: list[str] = []
+        self.avoid_phrases: list[str] = []
+
+        for h in self.hints:
+            pref = h.get("channel_preference") or "auto"
+            self.channel_preferences.append(pref)
+            for p in h.get("must_match_phrases") or []:
+                lp = p.lower().strip()
+                if lp and lp not in self.must_match_phrases:
+                    self.must_match_phrases.append(lp)
+            for p in h.get("avoid_phrases") or []:
+                lp = p.lower().strip()
+                if lp and lp not in self.avoid_phrases:
+                    self.avoid_phrases.append(lp)
 
         for h in self.hints:
             if h["metric"]:
@@ -2006,6 +2032,24 @@ def _rank_candidates(
             if hits:
                 score += 0.25 * min(hits, 3)
 
+        # W1 → W2: deterministic phrase filter from decompose retrieval_hint.
+        # Searches title + caption + row labels for must_match / avoid phrases.
+        if ctx.must_match_phrases or ctx.avoid_phrases:
+            haystack = title_text
+            row_labels = conn.execute(
+                "SELECT row_path FROM table_rows WHERE table_id = ? LIMIT 40",
+                (tid,),
+            ).fetchall()
+            haystack = haystack + " " + " ".join((rp or "").lower() for (rp,) in row_labels)
+            for phrase in ctx.must_match_phrases:
+                if phrase in haystack:
+                    score += 0.60
+                else:
+                    score -= 0.20
+            for phrase in ctx.avoid_phrases:
+                if phrase in haystack:
+                    score -= 0.40
+
         score += 0.12 * _file_year_bonus(
             row["file_year"], row["file_month"], ctx.target_years, ctx.year_mode
         )
@@ -2174,6 +2218,7 @@ def _llm_rerank_candidates(
     question: str,
     llm_counter: dict | None,
     max_llm_calls: int,
+    ctx: _RetrievalContext | None = None,
 ) -> list:
     """Optionally reorder ranked candidates using a cheap LLM call.
 
@@ -2181,6 +2226,7 @@ def _llm_rerank_candidates(
       - llm_counter budget allows (leaves room for extract + verify retries)
       - top-2 deterministic score gap < _RERANK_SCORE_GAP (ambiguous top)
       - at least 2 candidates exist
+      - no decompose channel_preference already steered the result
 
     On success: bumps the picked candidate's score to the top.
     On failure / null pick / parse error: returns original order.
@@ -2192,6 +2238,17 @@ def _llm_rerank_candidates(
     second_score = ranked[1][0]
     if (top_score - second_score) >= _RERANK_SCORE_GAP:
         return ranked  # deterministic funnel is confident enough
+
+    # W1 → W2: skip when decompose already gave a channel preference. If the
+    # top candidate came from the preferred channel (fts or metric), trust it.
+    if ctx is not None and ranked:
+        prefs = {p for p in ctx.channel_preferences if p and p != "auto"}
+        if prefs:
+            top_entry = ranked[0]
+            fts_v, met_v = top_entry[4], top_entry[5]
+            top_channel = "fts_keyword" if fts_v >= met_v else "metric_exact"
+            if top_channel in prefs:
+                return ranked
 
     if llm_counter is None or llm_counter.get("count", 0) >= max_llm_calls - 2:
         return ranked  # out of budget
@@ -2311,7 +2368,7 @@ def retrieve(
 
     fts_trace, metric_trace, pf_hits = _run_search_channels(conn, ctx, limit_ids)
     ranked = _rank_candidates(conn, ctx, fts_trace, metric_trace, limit_ids, top_k)
-    ranked = _llm_rerank_candidates(ranked, conn, question, llm_counter, max_llm_calls)
+    ranked = _llm_rerank_candidates(ranked, conn, question, llm_counter, max_llm_calls, ctx=ctx)
 
     return _build_entries(
         conn, ctx, ranked, pf_hits, top_k, dedupe_by_file, max_per_file, load_html
