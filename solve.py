@@ -84,6 +84,11 @@ def _build_cells_for_dr(dr: dict, table_id: int) -> list[dict] | None:
 
     Returns a list of {row_leaf, col_leaf, name} dicts, or None if the
     table structure can't support deterministic resolution for this DR.
+
+    Deterministic fast-path covers: ``annual`` / ``specific_month`` /
+    ``unknown`` (single-value), ``monthly_all``, and ``multi_year_annual``.
+    It does **not** cover ``continuous_monthly`` or ``monthly_range`` (span
+    logic is left to LLM extraction).
     """
     conn = _fp_conn()
     row_hint = dr.get("row_hint", "")
@@ -185,6 +190,9 @@ def _try_deterministic_fast_path(
     spec: dict, per_dr_entries: dict, verbose: bool = False
 ) -> tuple[dict[str, dict], list[str]]:
     """Try to resolve data_requests deterministically via resolve_cells().
+
+    Skips DRs whose ``granularity`` is not supported by ``_build_cells_for_dr``
+    (e.g. ``continuous_monthly``, ``monthly_range``) and non-corpus sources.
 
     Returns a tuple of (resolved_extractions, unresolved_dr_ids).
     - resolved_extractions: dict mapping dr_id → extraction dict (same structure
@@ -538,12 +546,16 @@ GRANULARITY ENUM (months are integers 1–12)
   "monthly_all"        — 12 monthly rows Jan–Dec for one year, expected_count 12
   "monthly_range"      — months [start_month..end_month] within a SINGLE year,
                          expected_count = end_month − start_month + 1
+                         (not handled by the deterministic fast-path; use LLM extract)
   "continuous_monthly" — CONTINUOUS span across multiple years, from
                          (start_year, start_month) to (end_year, end_month)
                          INCLUSIVE. Use for phrases like "March 1942 to October
                          1948" or "Jan 1984 through Mar 1987". Set `years` to
                          the list of years covered. expected_count = total
                          months in the span.
+                         NOTE: the deterministic ledger fast-path does not
+                         resolve continuous spans cell-by-cell; those DRs use
+                         LLM extraction after retrieval.
   "multi_year_annual"  — one annual row per year in `years`, expected_count len(years)
   "specific_month"     — single named month row, expected_count 1
 
@@ -712,6 +724,7 @@ OUTPUT — return ONLY this JSON schema, no prose
       "label": "<what this value is>",
       "source": "corpus|cpi|fx|external",
       "row_hint": "<exact row label from the corpus>",
+      "row_hint_alternatives": [],
       "column_hint": "<column header or year>",
       "section_hint": "<section header or table title to disambiguate, e.g. 'Budget' vs 'Criminal Cases'>",
       "years": [1940],
@@ -743,6 +756,124 @@ def _years_from_question(question: str) -> list[int]:
     import re as _re
 
     return sorted({int(y) for y in _re.findall(r"\b(1[89]\d{2}|20[0-3]\d)\b", question)})
+
+
+def _fallback_hints_from_question(question: str, years: list[int]) -> tuple[str, str]:
+    """Derive row/column hints when the LLM returned no usable spec.
+
+    Gives retrieval FTS/metric channels substantive tokens instead of empty
+    strings, and when a single data year is known, seeds ``column_hint`` so
+    the annual branch of ``_build_cells_for_dr`` can resolve a column leaf.
+    """
+    q = question.strip()
+    low = q.lower()
+    for prefix in (
+        "what were the ",
+        "what was the ",
+        "what is the ",
+        "what are the ",
+        "how much ",
+        "how many ",
+        "in which ",
+        "which ",
+    ):
+        if low.startswith(prefix):
+            q = q[len(prefix) :].lstrip()
+            low = q.lower()
+            break
+    if len(q) > 220:
+        q = q[:220].rsplit(" ", 1)[0].rstrip()
+    col = str(years[0]) if len(years) == 1 else ""
+    return q, col
+
+
+def _granularity_mismatch_feedback(question: str, spec: dict) -> str | None:
+    """Detect obvious CY wording paired with single-row annual granularity."""
+    import re as _re
+
+    ql = question.lower()
+    if "calendar year" not in ql and not _re.search(r"\bcy\b", ql):
+        return None
+    for dr in spec.get("data_requests") or []:
+        if not isinstance(dr, dict):
+            continue
+        if str(dr.get("source") or "corpus").lower() not in ("", "corpus"):
+            continue
+        if dr.get("cohort"):
+            continue
+        g = (dr.get("granularity") or "annual").strip().lower()
+        ec = dr.get("expected_count")
+        if g == "annual" and ec in (None, 1):
+            return (
+                "The question uses calendar-year (CY) wording. For a full calendar-year "
+                "TOTAL, Treasury tables are usually summed from 12 monthly rows: use "
+                '`granularity` "monthly_all", `expected_count` 12, and `computation` '
+                '"sum" unless the question clearly targets one fiscal annual row.'
+            )
+    return None
+
+
+def _normalize_row_hint_alternatives(spec: dict) -> None:
+    """Ensure each DR has a list[str] ``row_hint_alternatives`` (may be empty)."""
+    for dr in spec.get("data_requests") or []:
+        if not isinstance(dr, dict):
+            continue
+        alts = dr.get("row_hint_alternatives")
+        if alts is None:
+            dr["row_hint_alternatives"] = []
+            continue
+        if isinstance(alts, str):
+            dr["row_hint_alternatives"] = [alts.strip()] if alts.strip() else []
+        elif isinstance(alts, list):
+            dr["row_hint_alternatives"] = [str(x).strip() for x in alts if str(x).strip()]
+        else:
+            dr["row_hint_alternatives"] = []
+
+
+def _coerce_year_value(y: object) -> int | None:
+    """Best-effort int year from JSON scalar; bool is rejected."""
+    if isinstance(y, bool):
+        return None
+    if isinstance(y, int):
+        return y
+    if isinstance(y, float) and y.is_integer():
+        return int(y)
+    if isinstance(y, str) and y.strip().lstrip("-").isdigit():
+        return int(y.strip())
+    return None
+
+
+def _normalize_decompose_years(spec: dict, question: str) -> None:
+    """Coerce each DR's `years` to a list[int] and fill from the question when safe.
+
+    Mirrors validate_decompose.MISSING_YEARS: a single data_request with no
+    explicit years but year tokens in the question almost always means the LLM
+    forgot to copy them — downstream retrieval keys on `years`.
+    """
+    drs = spec.get("data_requests")
+    if not isinstance(drs, list) or not drs:
+        return
+    q_years = _years_from_question(question)
+    for dr in drs:
+        if not isinstance(dr, dict):
+            continue
+        raw = dr.get("years")
+        coerced: list[int] = []
+        if isinstance(raw, list):
+            for y in raw:
+                cy = _coerce_year_value(y)
+                if cy is not None:
+                    coerced.append(cy)
+        dr["years"] = coerced
+    if len(drs) == 1 and q_years:
+        dr0 = drs[0]
+        if not isinstance(dr0, dict):
+            return
+        if dr0.get("years"):
+            return
+        src = str(dr0.get("source") or "corpus").lower()
+        if src in ("corpus", "cpi", "fx", ""):
+            dr0["years"] = list(q_years)
 
 
 def _format_vocab_block(vocab: dict) -> str:
@@ -829,6 +960,9 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
         if v not in ("latest", "as_reported"):
             spec["vintage"] = "latest"
 
+        _normalize_decompose_years(spec, question)
+        _normalize_row_hint_alternatives(spec)
+
         # Reject duplicate-label DRs on binary computations: a `difference`
         # / `ratio` / `percent_change` between two identical things is
         # always meaningless and almost always a decompose mistake (the
@@ -861,6 +995,16 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
                     f"or switch to a different computation."
                 ),
             )
+
+        if "[GRANULARITY_FIX]" not in (feedback or ""):
+            gran_fb = _granularity_mismatch_feedback(question, spec)
+            if gran_fb:
+                return decompose(
+                    question,
+                    scout_hint=scout_hint,
+                    feedback=f"[GRANULARITY_FIX]\n{gran_fb}",
+                )
+
         return spec
 
     # Fallback when the LLM failed to produce a usable spec — don't drop
@@ -871,6 +1015,7 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
     import re as _re
 
     years = sorted({int(y) for y in _re.findall(r"\b(1[89]\d{2}|20[0-3]\d)\b", question)})
+    fb_row, fb_col = _fallback_hints_from_question(question, years)
     return {
         "computation": "direct",
         "data_requests": [
@@ -878,8 +1023,9 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
                 "id": "v1",
                 "label": question,
                 "source": "corpus",
-                "row_hint": "",
-                "column_hint": "",
+                "row_hint": fb_row,
+                "column_hint": fb_col,
+                "row_hint_alternatives": [],
                 "years": years,
                 "target_years": years,
                 "granularity": "unknown",

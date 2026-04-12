@@ -2,10 +2,13 @@
 """Run decompose() on a sample of benchmark questions concurrently.
 
 Usage:
-  uv run python eval_decompose.py [--n N] [--workers W] [--out FILE]
+  uv run python eval_decompose.py [--n N] [--workers W] [--out FILE] [--validate]
 
 Dumps one JSON object per line with {uid, question, gold_files, spec, error, elapsed_s}
 so we can inspect whether the LLM is correctly identifying what each question asks for.
+
+With ``--validate``, runs :func:`validate_decompose.check_spec` on each result (no
+extra LLM calls) and prints aggregate failure-tag counts.
 """
 
 import concurrent.futures
@@ -15,6 +18,7 @@ import sys
 import time
 
 from solve import decompose
+from validate_decompose import check_spec
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -41,6 +45,7 @@ def main():
     n = 20
     workers = 20
     out_path = "decompose_eval.jsonl"
+    do_validate = False
     for i, a in enumerate(sys.argv):
         if a == "--n" and i + 1 < len(sys.argv):
             n = int(sys.argv[i + 1])
@@ -48,6 +53,8 @@ def main():
             workers = int(sys.argv[i + 1])
         elif a == "--out" and i + 1 < len(sys.argv):
             out_path = sys.argv[i + 1]
+        elif a == "--validate":
+            do_validate = True
 
     with open("officeqa_full.csv") as f:
         rows = list(csv.DictReader(f))[:n]
@@ -75,6 +82,26 @@ def main():
         f"\nDone in {time.time() - t_start:.1f}s — "
         f"{len(results) - n_fail}/{len(results)} succeeded, {n_fail} failed"
     )
+
+    if do_validate:
+        fail_tags: dict[str, int] = {}
+        n_flagged = 0
+        for r in results:
+            row = {
+                "uid": r["uid"],
+                "question": r["question"],
+                "spec": r.get("spec"),
+            }
+            fails = check_spec(row)
+            if fails:
+                n_flagged += 1
+                for f in fails:
+                    key = f.split(":", 1)[-1].split("(", 1)[0]
+                    fail_tags[key] = fail_tags.get(key, 0) + 1
+        print("\n── validate_decompose (live run) ──")
+        print(f"  flagged rows: {n_flagged}/{len(results)}")
+        for k, v in sorted(fail_tags.items(), key=lambda x: -x[1]):
+            print(f"    {k:32s} {v:4d}")
 
 
 if __name__ == "__main__":

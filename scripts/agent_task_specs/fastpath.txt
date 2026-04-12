@@ -2,6 +2,11 @@ GOAL: Expand or harden deterministic fast-path (resolve_cells / bottom-up) behav
 
 READ FIRST: AGENTS.md at the repo root. Follow its Traversal Policy.
 
+CONTRACT NOTE: ``solve._build_cells_for_dr`` (ledger fast-path) resolves ``annual``,
+``specific_month``, ``unknown`` single-value, ``monthly_all``, and ``multi_year_annual``
+only. ``continuous_monthly`` and ``monthly_range`` always fall through to LLM extract
+after retrieval — do not claim full-span fast-path coverage for those granularities.
+
 IN SCOPE: find.py, tests that cover resolve_cells / fast-path (coordinate if solve.py must change — avoid parallel edits to the same solve.py regions as decompose).
 
 OUT OF SCOPE: extract.py, retrieve_v2.py, build_ledger.py

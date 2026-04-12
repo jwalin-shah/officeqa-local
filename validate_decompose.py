@@ -3,10 +3,12 @@
 
 Flags specs that are *definitely* broken, independent of semantic accuracy:
   - missing or empty data_requests
-  - empty row_hint AND empty label on a lookup-style question
-  - descriptive row_hint (long sentence instead of a literal row label)
+  - descriptive row_hint (long sentence instead of a literal row label); skipped
+    when ``cohort: true`` (cohort hints are intentionally phrased as filters)
   - unparseable computation_spec.python_template
-  - missing years on a question that contains explicit year tokens
+  - missing years on a question that contains explicit year tokens (single DR)
+  - ``years`` entries that are not integer-like numbers (rejects bools, strings,
+    and non-whole floats)
   - data_request with both row_hint and column_hint empty (orphan request)
 
 Usage:
@@ -22,6 +24,15 @@ from pathlib import Path
 sys.stdout.reconfigure(line_buffering=True)
 
 YEAR_RE = re.compile(r"\b(1[89]\d{2}|20[0-3]\d)\b")
+
+
+def _year_entry_ok(y: object) -> bool:
+    """True if ``y`` is a strict numeric integer year (rejects bool and strings)."""
+    if isinstance(y, bool):
+        return False
+    if isinstance(y, int):
+        return True
+    return isinstance(y, float) and y.is_integer()
 
 
 def check_spec(row: dict) -> list[str]:
@@ -55,6 +66,7 @@ def check_spec(row: dict) -> list[str]:
         col_hint = (dr.get("column_hint") or "").strip()
         label = (dr.get("label") or "").strip()
         years = dr.get("years") or []
+        is_cohort = bool(dr.get("cohort"))
 
         # Orphan: every hint field is empty. Retrieve can't do anything.
         if not row_hint and not col_hint and not label:
@@ -63,12 +75,17 @@ def check_spec(row: dict) -> list[str]:
 
         # Descriptive row_hint — substring match won't work against a
         # paragraph of prose describing which rows to pick.
-        if row_hint:
+        if row_hint and not is_cohort:
             word_count = len(row_hint.split())
             if word_count > 8:
                 fails.append(f"{tag}:LONG_ROW_HINT({word_count}w)")
             elif descriptive_markers.search(row_hint):
                 fails.append(f"{tag}:DESCRIPTIVE_ROW_HINT")
+
+        for y in years:
+            if not _year_entry_ok(y):
+                fails.append(f"{tag}:NON_INTEGER_YEAR")
+                break
 
         # Year extraction: if the question has explicit years but the DR
         # doesn't surface any, something went sideways. (Not all DRs need
