@@ -8,6 +8,7 @@ Strategy:
 """
 
 import contextlib
+import logging
 import os
 import re
 import subprocess
@@ -19,6 +20,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 MODEL = os.getenv("OFFICEQA_MODEL", "deepseek-chat")
 
@@ -1203,18 +1206,33 @@ def _is_annual_or_fy_label(label: str) -> bool:
     )
 
 
-def filter_cy_rows(text: str, granularity: str) -> str:
-    """Filter annual/FY summary rows from rendered context for CY questions.
+def filter_cy_rows(
+    text: str,
+    granularity: str,
+    years: list[int] | None = None,
+) -> str:
+    """Filter rows in rendered table context for calendar vs annual questions.
 
-    When granularity='monthly_all', removes rows where the label is a bare
-    year (e.g., "1940") or a fiscal-year designation (e.g., "Fiscal year 1940").
-    Only monthly data rows are kept, preventing the LLM from picking the wrong
-    total.
+    When ``granularity`` is ``monthly_all``, removes annual/FY summary rows
+    (bare year, "Fiscal year YYYY", etc.) so the model does not grab FY/CY
+    totals instead of months.
 
-    Handles both pipe-delimited and vertical serialization formats.
-    For other granularities, returns text unchanged.
+    When ``granularity`` is ``annual``, defensively removes pipe rows whose
+    first cell looks like a month-as-row label (``1940-January``, bare
+    ``February``, …) so mixed month+annual tables emphasize annual totals.
+    ``years`` (DR ``years`` list) tightens bare-month detection; optional.
+
+    Handles both pipe-delimited and vertical serialization formats for the
+    monthly path; the annual path targets pipe-delimited rows only.
+    Other granularities return ``text`` unchanged.
     """
-    if granularity != "monthly_all" or not text:
+    if not text:
+        return text
+
+    if granularity == "annual":
+        return _filter_pipe_monthly_rows_for_annual(text, years)
+
+    if granularity != "monthly_all":
         return text
 
     lines = text.split("\n")
@@ -1296,6 +1314,37 @@ def _detect_month_from_label(label: str, target_year: int | None) -> int | None:
                 return idx
 
     return None
+
+
+def _pipe_first_cell_is_monthly_row(first_cell: str, years: list[int] | None) -> bool:
+    """True if the first pipe cell looks like a month-as-row label (not an annual total)."""
+    s = first_cell.strip()
+    if not s:
+        return False
+    ty = years[0] if years else None
+    if _detect_month_from_label(s, ty) is not None:
+        return True
+    m = re.match(r"^(\d{4})[\s\-](.+)$", s, re.IGNORECASE)
+    if m:
+        row_year = int(m.group(1))
+        rest = m.group(2).strip()
+        if _detect_month_from_label(rest, row_year) is not None:
+            return True
+    return False
+
+
+def _filter_pipe_monthly_rows_for_annual(text: str, years: list[int] | None) -> str:
+    """Drop pipe rows whose first cell is a calendar month row; keep headers and annual totals."""
+    lines = text.split("\n")
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if "|" in stripped:
+            cells = _split_pipe_line(stripped)
+            if cells and _pipe_first_cell_is_monthly_row(cells[0], years):
+                continue
+        out.append(line)
+    return "\n".join(out)
 
 
 def _parse_vertical_monthly_values(text: str, row_hint: str = "") -> list[float] | None:
@@ -1508,6 +1557,15 @@ def _ensure_year_coverage(entries: list[dict], year_set: set[int]) -> list[dict]
     return priority + rest
 
 
+def _dr_context_budget(dr: dict, base: int) -> int:
+    """Scale per-DR character budget when ``expected_count`` signals a long series."""
+    exp = dr.get("expected_count")
+    if not isinstance(exp, int) or exp <= 1:
+        return base
+    scale = min(4.0, 1.0 + (exp - 1) / 30.0)
+    return min(200_000, int(base * scale))
+
+
 def extract_structured(
     spec: dict,
     per_dr_entries: dict,
@@ -1553,7 +1611,7 @@ def extract_structured(
     # Top-k retrieval returns 20 entries per DR. With dedupe_by_file we care
     # about seeing rank 19-20 as often as rank 1, so the budget has to be wide
     # enough to fit the full list even when each table has a lot of rows.
-    per_request_budget = max(6000, 48000 // max(1, len(data_requests)))
+    base_context_budget = max(6000, 48000 // max(1, len(data_requests)))
 
     any_hit = False
     for dr in corpus_drs:
@@ -1607,6 +1665,7 @@ def extract_structured(
             # the front so the char budget is spread across all years.
             if len(dr_year_set) > 1:
                 entries = _ensure_year_coverage(entries, dr_year_set)
+        per_request_budget = _dr_context_budget(dr, base_context_budget)
         _vt = 999 if _alt_render else 8
         _mr = 150 if _alt_render else 80
         ctx = (
@@ -1620,10 +1679,10 @@ def extract_structured(
             else ""
         )
 
-        # Apply CY row filtering for monthly_all questions — suppress
-        # annual/FY summary rows so the LLM doesn't pick the wrong total
-        if ctx and granularity == "monthly_all":
-            ctx = filter_cy_rows(ctx, granularity)
+        # Row filtering: monthly_all → drop annual/FY totals; annual → drop
+        # obvious month-as-row lines in pipe tables so CY vs FY rules stick.
+        if ctx and granularity in ("monthly_all", "annual"):
+            ctx = filter_cy_rows(ctx, granularity, dr_years)
 
         header = (
             f"=== Context for {dr_id} ({dr_label}) — years={dr_years} granularity={granularity} ==="
@@ -1675,7 +1734,7 @@ def extract_structured(
     if verbose:
         print(
             f"  Extract(v2): {len(context)} chars context, "
-            f"{len(data_requests)} data_requests (per-request budget {per_request_budget})"
+            f"{len(data_requests)} data_requests (base budget {base_context_budget})"
         )
 
     raw = llm(EXTRACT_STRUCTURED_SYSTEM, user_msg, max_tokens=2000)
@@ -1766,12 +1825,15 @@ def extract_structured(
         if (missing or incomplete) and not feedback:
             feedback_parts: list[str] = []
 
-            # Detect labels-but-null pattern → use alt rendering on retry
-            has_labels_null = (
+            # Alt rendering: wide vertical layout + more rows. Use when the
+            # first pass returned labels-but-null (missing) or any incomplete
+            # series — both benefit from seeing the full table spine.
+            has_labels_for_missing = (
                 any((extractions.get(did) or {}).get("labels") for did in missing)
                 if missing
                 else False
             )
+            use_alt_render_retry = bool(incomplete) or has_labels_for_missing
 
             if missing:
                 missing_details = []
@@ -1835,7 +1897,7 @@ def extract_structured(
                 question,
                 verbose=verbose,
                 feedback=retry_feedback,
-                _alt_render=has_labels_null,
+                _alt_render=use_alt_render_retry,
             )
             if retry and retry.get("extractions"):
                 retry_ex = retry["extractions"]
@@ -1868,6 +1930,83 @@ def extract_structured(
 # ── Ledger cross-check (post-extraction) ─────────────────────────────────
 
 
+def _html_cell_map(html: str) -> dict[tuple[str, str], float | None] | None:
+    """Parse one HTML table into (row_lower, col_lower) → numeric cell (or None)."""
+    if not html:
+        return None
+    try:
+        parser = _TableHTMLParser()
+        parser.feed(html)
+        parser.close()
+    except Exception:
+        return None
+    if len(parser.rows) < 2:
+        return None
+    cell_map: dict[tuple[str, str], float | None] = {}
+    headers = parser.rows[0]
+    for row in parser.rows[1:]:
+        if not row:
+            continue
+        rl = row[0].strip().lower()
+        for ci in range(1, min(len(row), len(headers))):
+            cl = headers[ci].strip().lower()
+            cell_map[(rl, cl)] = to_num(row[ci])
+    return cell_map if cell_map else None
+
+
+def _cell_nonnull_values_for_key(
+    entries: list[dict],
+    key: tuple[str, str],
+    *,
+    prefer_basename: str | None,
+) -> list[float]:
+    """Collect numeric cell values for `key` across entries, optionally scoped by file basename."""
+    out: list[float] = []
+    for entry in entries:
+        if prefer_basename:
+            eb = os.path.basename(entry.get("file") or "")
+            if eb and prefer_basename and eb != prefer_basename:
+                continue
+        m = _html_cell_map(entry.get("html") or "")
+        if not m or key not in m:
+            continue
+        v = m[key]
+        if v is not None:
+            out.append(v)
+    return out
+
+
+def _ground_truth_for_cell(
+    entries: list[dict],
+    key: tuple[str, str],
+    source_file: str | None,
+) -> float | None:
+    """Resolve a single ground-truth value when retrieved tables agree, or when
+    `source_file` disambiguates conflicting cells across multiple HTML blobs."""
+    all_vals = _cell_nonnull_values_for_key(entries, key, prefer_basename=None)
+    uniq = sorted(set(all_vals))
+    if len(uniq) == 1:
+        return uniq[0]
+    if len(uniq) > 1 and source_file:
+        sb = os.path.basename(source_file)
+        scoped = _cell_nonnull_values_for_key(entries, key, prefer_basename=sb)
+        scoped_uniq = sorted(set(scoped))
+        if len(scoped_uniq) == 1:
+            return scoped_uniq[0]
+    return None
+
+
+def _ledger_values_match(val: float, ground_truth: float) -> bool:
+    """True if extracted value matches parsed table cell within tolerance."""
+    if val == ground_truth:
+        return True
+    if val != 0 and abs(val - ground_truth) / abs(val) < 0.0001:
+        return True
+    if ground_truth != 0 and abs(val - ground_truth) / abs(ground_truth) < 0.0001:
+        return True
+    return abs(val - ground_truth) <= 1e-6
+
+
 def _verify_against_ledger(
     extractions: dict,
     data_requests: list[dict],
@@ -1888,61 +2027,58 @@ def _verify_against_ledger(
         ex = extractions.get(dr_id)
         if not isinstance(ex, dict):
             continue
+        src = (dr.get("source") or "corpus").lower()
         values = ex.get("values") or []
         row_labels = ex.get("row_labels") or []
         col_labels = ex.get("col_labels") or []
+        entries = per_dr_entries.get(dr_id) or []
+
         if not row_labels or not col_labels:
+            if src == "corpus" and any(x is not None for x in values) and entries:
+                logger.warning(
+                    "Ledger cross-check skipped for %s: missing row_labels or col_labels "
+                    "(return both from the table for HTML grounding)",
+                    dr_id,
+                )
             continue
         if len(row_labels) != len(values) or len(col_labels) != len(values):
+            if src == "corpus" and any(x is not None for x in values) and entries:
+                logger.warning(
+                    "Ledger cross-check skipped for %s: row_labels/col_labels length "
+                    "does not match values (rows=%s cols=%s vals=%s)",
+                    dr_id,
+                    len(row_labels),
+                    len(col_labels),
+                    len(values),
+                )
             continue
 
-        entries = per_dr_entries.get(dr_id) or []
         if not entries:
             continue
 
-        # Build a lookup from the HTML tables: (row_label_lower, col_label_lower) → cell_value
-        cell_map: dict[tuple[str, str], float | None] = {}
+        any_cell = False
         for entry in entries:
-            html = entry.get("html") or ""
-            if not html:
-                continue
-            try:
-                parser = _TableHTMLParser()
-                parser.feed(html)
-                parser.close()
-            except Exception:
-                continue
-            if len(parser.rows) < 2:
-                continue
-            headers = parser.rows[0]
-            for row in parser.rows[1:]:
-                if not row:
-                    continue
-                rl = row[0].strip().lower()
-                for ci in range(1, min(len(row), len(headers))):
-                    cl = headers[ci].strip().lower()
-                    val = to_num(row[ci])
-                    cell_map[(rl, cl)] = val
-
-        if not cell_map:
+            if _html_cell_map(entry.get("html") or ""):
+                any_cell = True
+                break
+        if not any_cell:
             continue
+
+        source_file = ex.get("source_file")
+        source_file = source_file.strip() or None if isinstance(source_file, str) else None
 
         corrections = 0
         for i, (rl, cl, val) in enumerate(zip(row_labels, col_labels, values, strict=False)):
             if val is None or rl is None or cl is None:
                 continue
             key = (str(rl).strip().lower(), str(cl).strip().lower())
-            if key not in cell_map:
-                continue
-            ground_truth = cell_map[key]
+            ground_truth = _ground_truth_for_cell(entries, key, source_file)
             if ground_truth is None:
                 continue
-            # Allow small float tolerance (< 0.01% relative)
-            if val != 0 and abs(val - ground_truth) / abs(val) < 0.0001:
+            if _ledger_values_match(float(val), float(ground_truth)):
                 continue
-            if val != ground_truth:
-                corrections += 1
-                values[i] = ground_truth
+            corrections += 1
+            values[i] = ground_truth
 
         if corrections > 0:
             ex["values"] = values
