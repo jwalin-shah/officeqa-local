@@ -558,7 +558,7 @@ def _make_table_entry(table_id: int = 42) -> dict:
 def test_fast_path_all_resolve_annual():
     """When all data_requests resolve deterministically, fast-path returns
     (resolved_extractions, []) tuple without calling the LLM."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     entries = [_make_table_entry(table_id=42)]
@@ -572,13 +572,13 @@ def test_fast_path_all_resolve_annual():
             "solve._build_cells_for_dr",
             return_value=[{"row_leaf": "National defense", "col_leaf": "1940", "name": "v1"}],
         ),
-        patch("solve.resolve_cells") as mock_resolve,
+        patch("find.resolve_cells") as mock_resolve,
     ):
         mock_resolve.return_value = {
             "values": {"v1": 1580.0},
             "debug": {"v1": {"status": "ok", "raw": "1580", "num": 1580.0}},
         }
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     resolved, unresolved_ids = result
     assert "v1" in resolved
@@ -592,7 +592,7 @@ def test_fast_path_all_resolve_annual():
 def test_fast_path_partial_resolve_falls_back():
     """When resolve_cells returns None for any value, that DR is marked
     unresolved and the caller should fall back to LLM extraction for it."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     entries = [_make_table_entry(table_id=42)]
@@ -604,13 +604,13 @@ def test_fast_path_partial_resolve_falls_back():
             "solve._build_cells_for_dr",
             return_value=[{"row_leaf": "National defense", "col_leaf": "1940", "name": "v1"}],
         ),
-        patch("solve.resolve_cells") as mock_resolve,
+        patch("find.resolve_cells") as mock_resolve,
     ):
         mock_resolve.return_value = {
             "values": {"v1": None},
             "debug": {"v1": {"status": "label_miss", "row_found": True, "col_found": False}},
         }
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     # Fast-path should mark v1 as unresolved
     resolved, unresolved_ids = result
@@ -621,7 +621,7 @@ def test_fast_path_partial_resolve_falls_back():
 def test_fast_path_external_source_graceful():
     """When a data_request has source='external', fast-path marks it unresolved
     (not a crash)."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     # Override the source to 'external'
@@ -629,7 +629,7 @@ def test_fast_path_external_source_graceful():
     entries = [_make_table_entry(table_id=42)]
     per_dr = {"v1": entries}
 
-    result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+    result = try_deterministic_fast_path(spec, per_dr, verbose=True)
     # Should return (empty, ["v1"]) gracefully, not raise
     resolved, unresolved_ids = result
     assert "v1" not in resolved
@@ -638,14 +638,14 @@ def test_fast_path_external_source_graceful():
 
 def test_fast_path_cpi_source_skipped():
     """When a data_request has source='cpi', fast-path marks it unresolved."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     spec["data_requests"][0]["source"] = "cpi"
     entries = [_make_table_entry(table_id=42)]
     per_dr = {"v1": entries}
 
-    result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+    result = try_deterministic_fast_path(spec, per_dr, verbose=True)
     resolved, unresolved_ids = result
     assert "v1" not in resolved
     assert "v1" in unresolved_ids
@@ -653,12 +653,12 @@ def test_fast_path_cpi_source_skipped():
 
 def test_fast_path_no_retrieved_entries():
     """When per_dr_entries has no entries for a DR, it's marked unresolved."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     per_dr = {"v1": []}  # empty entries
 
-    result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+    result = try_deterministic_fast_path(spec, per_dr, verbose=True)
     resolved, unresolved_ids = result
     assert "v1" not in resolved
     assert "v1" in unresolved_ids
@@ -666,7 +666,7 @@ def test_fast_path_no_retrieved_entries():
 
 def test_fast_path_no_table_entries_only_pf():
     """When only prose/footnote entries exist (no table entries), DR is marked unresolved."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     # Prose/footnote entries have 'content' but no 'html' with data
@@ -684,7 +684,7 @@ def test_fast_path_no_table_entries_only_pf():
     }
     per_dr = {"v1": [pf_entry]}
 
-    result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+    result = try_deterministic_fast_path(spec, per_dr, verbose=True)
     resolved, unresolved_ids = result
     assert "v1" not in resolved
     assert "v1" in unresolved_ids
@@ -692,14 +692,14 @@ def test_fast_path_no_table_entries_only_pf():
 
 def test_fast_path_table_id_not_found():
     """When the table_id can't be resolved from the entry, DR is marked unresolved."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     entries = [_make_table_entry(table_id=42)]
     per_dr = {"v1": entries}
 
     with patch("solve._get_table_id_from_entry", return_value=None):
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     resolved, unresolved_ids = result
     assert "v1" not in resolved
@@ -708,7 +708,7 @@ def test_fast_path_table_id_not_found():
 
 def test_fast_path_cant_build_cells():
     """When _build_cells_for_dr returns None (unsupported granularity), DR is marked unresolved."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     entries = [_make_table_entry(table_id=42)]
@@ -718,7 +718,7 @@ def test_fast_path_cant_build_cells():
         patch("solve._get_table_id_from_entry", return_value=42),
         patch("solve._build_cells_for_dr", return_value=None),
     ):
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     resolved, unresolved_ids = result
     assert "v1" not in resolved
@@ -728,7 +728,7 @@ def test_fast_path_cant_build_cells():
 def test_fast_path_multi_dr_all_resolve():
     """When multiple data_requests all resolve, fast-path returns extractions
     for all DRs with empty unresolved list."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_multi_dr_spec()
     entries = [_make_table_entry(table_id=42)]
@@ -737,7 +737,7 @@ def test_fast_path_multi_dr_all_resolve():
     with (
         patch("solve._get_table_id_from_entry", return_value=42),
         patch("solve._build_cells_for_dr") as mock_build,
-        patch("solve.resolve_cells") as mock_resolve,
+        patch("find.resolve_cells") as mock_resolve,
     ):
         # First call for v1, second for v2
         mock_build.side_effect = [
@@ -748,7 +748,7 @@ def test_fast_path_multi_dr_all_resolve():
             {"values": {"v1": 1200.0}, "debug": {}},
             {"values": {"v2": 1580.0}, "debug": {}},
         ]
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     resolved, unresolved_ids = result
     assert resolved["v1"]["values"] == [1200.0]
@@ -759,7 +759,7 @@ def test_fast_path_multi_dr_all_resolve():
 def test_fast_path_multi_dr_partial_fails():
     """When one of two data_requests fails to resolve, v1 is in resolved
     and v2 is in unresolved_ids (partial result)."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_multi_dr_spec()
     entries = [_make_table_entry(table_id=42)]
@@ -768,7 +768,7 @@ def test_fast_path_multi_dr_partial_fails():
     with (
         patch("solve._get_table_id_from_entry", return_value=42),
         patch("solve._build_cells_for_dr") as mock_build,
-        patch("solve.resolve_cells") as mock_resolve,
+        patch("find.resolve_cells") as mock_resolve,
     ):
         mock_build.side_effect = [
             [{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
@@ -779,7 +779,7 @@ def test_fast_path_multi_dr_partial_fails():
             {"values": {"v1": 1200.0}, "debug": {}},
             {"values": {"v2": None}, "debug": {"v2": {"status": "label_miss"}}},
         ]
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     # v1 should be resolved, v2 should be unresolved
     resolved, unresolved_ids = result
@@ -791,7 +791,7 @@ def test_fast_path_multi_dr_partial_fails():
 def test_fast_path_monthly_all_resolve():
     """When monthly_all DR resolves all 12 values, fast-path returns
     extractions with 12 values in order."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_monthly_spec()
     entries = [_make_table_entry(table_id=42)]
@@ -806,10 +806,10 @@ def test_fast_path_monthly_all_resolve():
     with (
         patch("solve._get_table_id_from_entry", return_value=42),
         patch("solve._build_cells_for_dr", return_value=monthly_cells),
-        patch("solve.resolve_cells") as mock_resolve,
+        patch("find.resolve_cells") as mock_resolve,
     ):
         mock_resolve.return_value = {"values": monthly_values, "debug": {}}
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     resolved, unresolved_ids = result
     assert len(resolved["v1"]["values"]) == 12
@@ -820,7 +820,7 @@ def test_fast_path_monthly_all_resolve():
 
 def test_fast_path_monthly_incomplete_fails():
     """When monthly_all DR resolves fewer than 12 values, it's marked unresolved."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_monthly_spec()
     entries = [_make_table_entry(table_id=42)]
@@ -836,10 +836,10 @@ def test_fast_path_monthly_incomplete_fails():
     with (
         patch("solve._get_table_id_from_entry", return_value=42),
         patch("solve._build_cells_for_dr", return_value=incomplete_cells),
-        patch("solve.resolve_cells") as mock_resolve,
+        patch("find.resolve_cells") as mock_resolve,
     ):
         mock_resolve.return_value = {"values": incomplete_values, "debug": {}}
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     # Should mark v1 as unresolved because we don't have 12 values
     resolved, unresolved_ids = result
@@ -900,9 +900,9 @@ def test_fast_path_monthly_values_format_matches_compute():
 
 def test_fast_path_empty_spec():
     """Fast-path returns ({}, []) when spec has no data_requests."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
-    result = _try_deterministic_fast_path({}, {}, verbose=True)
+    result = try_deterministic_fast_path({}, {}, verbose=True)
     resolved, unresolved_ids = result
     assert resolved == {}
     assert unresolved_ids == []
@@ -910,21 +910,21 @@ def test_fast_path_empty_spec():
 
 def test_fast_path_logging_on_success(capsys):
     """Fast-path logs when all DRs resolve deterministically."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     entries = [_make_table_entry(table_id=42)]
     per_dr = {"v1": entries}
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("find._get_table_id_from_entry", return_value=42),
         patch(
-            "solve._build_cells_for_dr",
+            "find._build_cells_for_dr",
             return_value=[{"row_leaf": "National defense", "col_leaf": "1940", "name": "v1"}],
         ),
-        patch("solve.resolve_cells", return_value={"values": {"v1": 1580.0}, "debug": {}}),
+        patch("find.resolve_cells", return_value={"values": {"v1": 1580.0}, "debug": {}}),
     ):
-        _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     captured = capsys.readouterr()
     assert "Fast-path" in captured.out or "deterministic" in captured.out.lower()
@@ -932,24 +932,24 @@ def test_fast_path_logging_on_success(capsys):
 
 def test_fast_path_logging_on_failure(capsys):
     """Fast-path logs when it falls back (unresolved cells)."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     entries = [_make_table_entry(table_id=42)]
     per_dr = {"v1": entries}
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("find._get_table_id_from_entry", return_value=42),
         patch(
-            "solve._build_cells_for_dr",
+            "find._build_cells_for_dr",
             return_value=[{"row_leaf": "National defense", "col_leaf": "1940", "name": "v1"}],
         ),
         patch(
-            "solve.resolve_cells",
+            "find.resolve_cells",
             return_value={"values": {"v1": None}, "debug": {"v1": {"status": "label_miss"}}},
         ),
     ):
-        _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     captured = capsys.readouterr()
     assert "Fast-path" in captured.out or "fast-path" in captured.out.lower()
@@ -1122,7 +1122,7 @@ def test_fast_path_effective_row_hint_for_bottomup_order():
 
 def test_fast_path_bottomup_called_with_keyword_when_row_hint_empty():
     """Empty row_hint but non-empty keywords still triggers bottom-up with effective row string."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     spec["data_requests"][0]["row_hint"] = ""
@@ -1152,7 +1152,7 @@ def test_fast_path_bottomup_called_with_keyword_when_row_hint_empty():
         patch("solve.search_cells_bottomup") as mock_bu,
     ):
         mock_bu.return_value = [bu_hit]
-        resolved, unresolved = _try_deterministic_fast_path(spec, per_dr, verbose=False)
+        resolved, unresolved = try_deterministic_fast_path(spec, per_dr, verbose=False)
 
     mock_bu.assert_called_once()
     _args, kwargs = mock_bu.call_args
@@ -1166,7 +1166,7 @@ def test_fast_path_bottomup_called_with_keyword_when_row_hint_empty():
 
 def test_fast_path_bottomup_called_with_label_when_row_hint_and_keywords_empty():
     """With row_hint and keywords empty, label alone can drive bottom-up row + topic strings."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_annual_spec()
     spec["data_requests"][0]["row_hint"] = ""
@@ -1197,7 +1197,7 @@ def test_fast_path_bottomup_called_with_label_when_row_hint_and_keywords_empty()
         patch("solve.search_cells_bottomup") as mock_bu,
     ):
         mock_bu.return_value = [bu_hit]
-        resolved, unresolved = _try_deterministic_fast_path(spec, per_dr, verbose=False)
+        resolved, unresolved = try_deterministic_fast_path(spec, per_dr, verbose=False)
 
     mock_bu.assert_called_once()
     _args, kwargs = mock_bu.call_args
@@ -1217,7 +1217,7 @@ def test_fast_path_with_run_extract_and_compute():
     per_dr = {"v1": entries}
 
     with (
-        patch("solve._try_deterministic_fast_path") as mock_fp,
+        patch("solve.try_deterministic_fast_path") as mock_fp,
         patch("solve.extract_structured") as mock_llm,
         patch("solve.compute_execute", return_value=1580.0) as mock_compute,
         patch("solve.format_result", return_value="1580"),
@@ -1253,7 +1253,7 @@ def test_fast_path_fallback_to_llm():
     per_dr = {"v1": entries}
 
     with (
-        patch("solve._try_deterministic_fast_path") as mock_fp,
+        patch("solve.try_deterministic_fast_path") as mock_fp,
         patch("solve.extract_structured") as mock_llm,
         patch("solve.validate_extractions", return_value=[]),
         patch("solve.compute_execute", return_value=1580.0),
@@ -1845,7 +1845,7 @@ def test_detect_month_index_rejects_market():
 def test_fast_path_partial_returns_resolved_and_unresolved():
     """When one DR resolves and another doesn't, fast-path returns partial
     results (resolved dict + unresolved list) instead of None."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_multi_dr_spec()
     entries = [_make_table_entry(table_id=42)]
@@ -1854,7 +1854,7 @@ def test_fast_path_partial_returns_resolved_and_unresolved():
     with (
         patch("solve._get_table_id_from_entry", return_value=42),
         patch("solve._build_cells_for_dr") as mock_build,
-        patch("solve.resolve_cells") as mock_resolve,
+        patch("find.resolve_cells") as mock_resolve,
     ):
         mock_build.side_effect = [
             [{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
@@ -1865,7 +1865,7 @@ def test_fast_path_partial_returns_resolved_and_unresolved():
             {"values": {"v1": 1200.0}, "debug": {}},
             {"values": {"v2": None}, "debug": {"v2": {"status": "label_miss"}}},
         ]
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     # Should return partial results, not None
     assert result is not None
@@ -1878,7 +1878,7 @@ def test_fast_path_partial_returns_resolved_and_unresolved():
 def test_fast_path_partial_external_source_dr():
     """When a DR has source='external', it becomes unresolved but other DRs
     are still resolved."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_multi_dr_spec()
     spec["data_requests"][1]["source"] = "external"  # v2 is external
@@ -1891,13 +1891,13 @@ def test_fast_path_partial_external_source_dr():
             "solve._build_cells_for_dr",
             return_value=[{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
         ),
-        patch("solve.resolve_cells") as mock_resolve,
+        patch("find.resolve_cells") as mock_resolve,
     ):
         mock_resolve.return_value = {
             "values": {"v1": 1200.0},
             "debug": {},
         }
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     assert result is not None
     resolved, unresolved_ids = result
@@ -1907,7 +1907,7 @@ def test_fast_path_partial_external_source_dr():
 
 def test_fast_path_partial_no_entries_for_one_dr():
     """When one DR has no retrieved entries, it becomes unresolved."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_multi_dr_spec()
     entries = [_make_table_entry(table_id=42)]
@@ -1919,13 +1919,13 @@ def test_fast_path_partial_no_entries_for_one_dr():
             "solve._build_cells_for_dr",
             return_value=[{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
         ),
-        patch("solve.resolve_cells") as mock_resolve,
+        patch("find.resolve_cells") as mock_resolve,
     ):
         mock_resolve.return_value = {
             "values": {"v1": 1200.0},
             "debug": {},
         }
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     assert result is not None
     resolved, unresolved_ids = result
@@ -1935,7 +1935,7 @@ def test_fast_path_partial_no_entries_for_one_dr():
 
 def test_fast_path_all_resolve_returns_empty_unresolved():
     """When all DRs resolve, unresolved list is empty."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_multi_dr_spec()
     entries = [_make_table_entry(table_id=42)]
@@ -1944,7 +1944,7 @@ def test_fast_path_all_resolve_returns_empty_unresolved():
     with (
         patch("solve._get_table_id_from_entry", return_value=42),
         patch("solve._build_cells_for_dr") as mock_build,
-        patch("solve.resolve_cells") as mock_resolve,
+        patch("find.resolve_cells") as mock_resolve,
     ):
         mock_build.side_effect = [
             [{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
@@ -1954,7 +1954,7 @@ def test_fast_path_all_resolve_returns_empty_unresolved():
             {"values": {"v1": 1200.0}, "debug": {}},
             {"values": {"v2": 1580.0}, "debug": {}},
         ]
-        result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+        result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     assert result is not None
     resolved, unresolved_ids = result
@@ -1965,12 +1965,12 @@ def test_fast_path_all_resolve_returns_empty_unresolved():
 
 def test_fast_path_all_fail_returns_empty_resolved():
     """When all DRs fail, resolved dict is empty and all are unresolved."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
     spec = _make_multi_dr_spec()
     per_dr = {"v1": [], "v2": []}
 
-    result = _try_deterministic_fast_path(spec, per_dr, verbose=True)
+    result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     assert result is not None
     resolved, unresolved_ids = result
@@ -1981,9 +1981,9 @@ def test_fast_path_all_fail_returns_empty_resolved():
 
 def test_fast_path_empty_spec_returns_empty():
     """Empty spec returns empty resolved and empty unresolved."""
-    from solve import _try_deterministic_fast_path
+    from find import try_deterministic_fast_path
 
-    result = _try_deterministic_fast_path({}, {}, verbose=True)
+    result = try_deterministic_fast_path({}, {}, verbose=True)
 
     assert result is not None
     resolved, unresolved_ids = result
@@ -2027,7 +2027,7 @@ def test_run_extract_and_compute_merges_partial_fast_path():
     }
 
     with (
-        patch("solve._try_deterministic_fast_path", return_value=fast_result) as mock_fp,
+        patch("solve.try_deterministic_fast_path", return_value=fast_result) as mock_fp,
         patch("solve.extract_structured") as mock_llm,
         patch("solve.validate_extractions", return_value=[]),
         patch("solve.compute_execute", return_value=31.67) as mock_compute,
@@ -2070,7 +2070,7 @@ def test_run_extract_and_compute_skips_llm_when_all_resolved():
     )
 
     with (
-        patch("solve._try_deterministic_fast_path", return_value=fast_result),
+        patch("solve.try_deterministic_fast_path", return_value=fast_result),
         patch("solve.extract_structured") as mock_llm,
         patch("solve.validate_extractions", return_value=[]),
         patch("solve.compute_execute", return_value=1580.0),

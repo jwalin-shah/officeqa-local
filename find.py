@@ -1852,3 +1852,348 @@ def _cli() -> None:
 
 if __name__ == "__main__":
     _cli()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DETERMINISTIC FAST-PATH  (used by solve.py before LLM extraction)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_table_id_from_entry(entry: dict) -> int | None:
+    """Look up the ledger table id from a retrieve_v2 entry's file + element_seq."""
+    try:
+        row = (
+            _conn()
+            .execute(
+                "SELECT id FROM tables WHERE file = ? AND element_seq = ? LIMIT 1",
+                (entry.get("file"), entry.get("element_seq")),
+            )
+            .fetchone()
+        )
+    except sqlite3.OperationalError:
+        return None
+    return row["id"] if row else None
+
+
+def _build_cells_for_dr(dr: dict, table_id: int) -> list[dict] | None:
+    """Build cell specs for resolve_cells() from a data_request + table_id.
+
+    Returns a list of {row_leaf, col_leaf, name} dicts, or None if the
+    table structure can't support deterministic resolution for this DR.
+
+    Deterministic fast-path covers: ``annual`` / ``specific_month`` /
+    ``unknown`` (single-value), ``monthly_all``, and ``multi_year_annual``.
+    It does **not** cover ``continuous_monthly`` or ``monthly_range`` (span
+    logic is left to LLM extraction).
+    """
+    conn = _conn()
+    row_hint = dr.get("row_hint", "")
+    column_hint = dr.get("column_hint", "")
+    granularity = dr.get("granularity", "annual")
+    years = dr.get("years") or []
+    expected_count = dr.get("expected_count")
+
+    # ── Annual / single-value lookups ──────────────────────────────────
+    if granularity in ("annual", "specific_month", "unknown", None) and (
+        expected_count is None or expected_count == 1
+    ):
+        col_leaf = column_hint or ""
+        if column_hint and column_hint.lstrip("-").isdigit():
+            year = int(column_hint)
+            col = conn.execute(
+                "SELECT col_leaf FROM table_columns WHERE table_id=? AND year_extracted=? LIMIT 1",
+                (table_id, year),
+            ).fetchone()
+            if col:
+                col_leaf = col["col_leaf"]
+        elif not column_hint and years:
+            year = years[0]
+            col = conn.execute(
+                "SELECT col_leaf FROM table_columns WHERE table_id=? AND year_extracted=? LIMIT 1",
+                (table_id, year),
+            ).fetchone()
+            if col:
+                col_leaf = col["col_leaf"]
+        return [{"row_leaf": row_hint, "col_leaf": col_leaf, "name": dr["id"]}]
+
+    # ── Monthly all (12 values) ────────────────────────────────────────
+    if granularity == "monthly_all":
+        target_year = years[0] if years else None
+        if target_year is None:
+            return None
+
+        # Option A: months as columns (e.g. col_leaf = "Jan.", "Feb.")
+        month_cols = conn.execute(
+            "SELECT col_leaf, month_extracted FROM table_columns "
+            "WHERE table_id=? AND year_extracted=? AND month_extracted IS NOT NULL "
+            "ORDER BY month_extracted",
+            (table_id, target_year),
+        ).fetchall()
+
+        if len(month_cols) >= 10:
+            return [
+                {
+                    "row_leaf": row_hint,
+                    "col_leaf": col["col_leaf"],
+                    "name": f"m{col['month_extracted']:02d}",
+                }
+                for col in month_cols
+            ]
+
+        # Option B: months as rows (e.g. row_leaf = "1940-January")
+        month_rows = conn.execute(
+            "SELECT row_leaf, month_extracted FROM table_rows "
+            "WHERE table_id=? AND year_extracted=? AND month_extracted IS NOT NULL "
+            "ORDER BY month_extracted",
+            (table_id, target_year),
+        ).fetchall()
+
+        if len(month_rows) >= 10:
+            col_leaf = column_hint or ""
+            if not col_leaf:
+                col = conn.execute(
+                    "SELECT col_leaf FROM table_columns WHERE table_id=? LIMIT 1 OFFSET 1",
+                    (table_id,),
+                ).fetchone()
+                if col:
+                    col_leaf = col["col_leaf"]
+            return [
+                {
+                    "row_leaf": row["row_leaf"],
+                    "col_leaf": col_leaf,
+                    "name": f"m{row['month_extracted']:02d}",
+                }
+                for row in month_rows
+            ]
+
+        return None  # Can't determine monthly layout
+
+    # ── Multi-year annual (one value per year) ──────────────────────────
+    if granularity == "multi_year_annual" and years:
+        cells = []
+        for y in years:
+            col = conn.execute(
+                "SELECT col_leaf FROM table_columns WHERE table_id=? AND year_extracted=? LIMIT 1",
+                (table_id, y),
+            ).fetchone()
+            col_leaf = col["col_leaf"] if col else str(y)
+            cells.append({"row_leaf": row_hint, "col_leaf": col_leaf, "name": f"y{y}"})
+        return cells
+
+    return None  # Unsupported granularity
+
+
+def try_deterministic_fast_path(
+    spec: dict, per_dr_entries: dict, verbose: bool = False
+) -> tuple[dict[str, dict], list[str]]:
+    """Try to resolve data_requests deterministically via resolve_cells().
+
+    Called by solve.py before invoking LLM extraction. Skips DRs whose
+    ``granularity`` is unsupported (e.g. ``continuous_monthly``) and
+    non-corpus sources (cpi, fx, external).
+
+    Returns (resolved_extractions, unresolved_dr_ids).
+    - resolved_extractions: dr_id → extraction dict (same shape as extract_structured output)
+    - unresolved_dr_ids: dr_ids that could not be resolved — caller falls back to LLM
+
+    When unresolved_dr_ids is empty, LLM extraction can be skipped entirely.
+    """
+    data_requests = spec.get("data_requests") or []
+    if not data_requests:
+        return {}, []
+
+    vintage = spec.get("vintage", "latest")
+    extractions: dict[str, dict] = {}
+    unresolved_ids: list[str] = []
+    notes_parts: list[str] = []
+
+    for dr in data_requests:
+        dr_id = dr.get("id", "?")
+        source = dr.get("source", "corpus")
+
+        if source in ("external", "cpi", "fx"):
+            if verbose:
+                print(f"  Fast-path: {dr_id} skipped (source={source})")
+            unresolved_ids.append(dr_id)
+            continue
+
+        entries = per_dr_entries.get(dr_id) or []
+        if not entries:
+            if verbose:
+                print(f"  Fast-path: {dr_id} no retrieved entries")
+            unresolved_ids.append(dr_id)
+            continue
+
+        # Find a table entry (skip prose/footnote entries which have 'content')
+        table_entry = next(
+            (
+                e
+                for e in entries
+                if not e.get("content") and (e.get("element_seq") is not None or e.get("html"))
+            ),
+            None,
+        )
+        if table_entry is None:
+            if verbose:
+                print(f"  Fast-path: {dr_id} no table entries")
+            unresolved_ids.append(dr_id)
+            continue
+
+        table_id = _get_table_id_from_entry(table_entry)
+        if table_id is None:
+            if verbose:
+                print(f"  Fast-path: {dr_id} table_id not found")
+            unresolved_ids.append(dr_id)
+            continue
+
+        cells = _build_cells_for_dr(dr, table_id)
+        if cells is None:
+            if verbose:
+                print(
+                    f"  Fast-path: {dr_id} can't build cells (granularity={dr.get('granularity')})"
+                )
+            unresolved_ids.append(dr_id)
+            continue
+
+        try:
+            resolved = resolve_cells(table_id, cells, vintage=vintage)
+        except Exception as e:
+            if verbose:
+                print(f"  Fast-path: {dr_id} resolve_cells error: {e}")
+            unresolved_ids.append(dr_id)
+            continue
+
+        values = resolved.get("values", {})
+        unresolved_cells = [k for k, v in values.items() if v is None]
+
+        if unresolved_cells:
+            # Bottom-up fallback: let the ledger pick the best table by row slug match
+            row_raw = (dr.get("row_hint") or "").strip()
+            dr_years = dr.get("years") or []
+            col_year = dr_years[0] if dr_years else None
+            keywords = dr.get("keywords") or []
+            label_s = (dr.get("label") or "").strip()
+
+            topic_parts = [
+                str(k).strip() for k in keywords[:6] if isinstance(k, str) and str(k).strip()
+            ]
+            if row_raw:
+                topic_parts.append(row_raw)
+            elif not topic_parts and label_s:
+                topic_parts.append(label_s)
+            topic = " ".join(topic_parts) if topic_parts else label_s
+
+            granularity = dr.get("granularity", "annual")
+            eff_row = effective_row_hint_for_bottomup(
+                row_raw, label=dr.get("label") or "", keywords=keywords if keywords else None
+            )
+
+            if eff_row and granularity in ("annual", "specific_month", "unknown", None):
+                bu_hits = search_cells_bottomup(
+                    row_hint=eff_row, col_year=col_year, topic=topic or eff_row, limit=5
+                )
+                if bu_hits:
+                    best = bu_hits[0]
+                    numeric = best.get("numeric_value")
+                    if numeric is not None:
+                        if verbose:
+                            print(
+                                f"  Fast-path: {dr_id} bottomup hit → "
+                                f"{numeric} from {best['file']} "
+                                f"(row={best['row_leaf']}, col={best['col_leaf']})"
+                            )
+                        extractions[dr_id] = {
+                            "values": [numeric],
+                            "labels": [best.get("row_leaf", "")],
+                            "source_file": best["file"],
+                            "confidence": "bottomup",
+                            "bottomup_table_id": best["table_id"],
+                            "bottomup_file_year": best["file_year"],
+                        }
+                        notes_parts.append(
+                            f"{dr_id}: resolved via bottom-up search (table {best['table_id']}, {best['file']})"
+                        )
+                        continue
+
+            if verbose:
+                print(f"  Fast-path: {dr_id} unresolved cells: {unresolved_cells}")
+            unresolved_ids.append(dr_id)
+            continue
+
+        # Convert resolved values to extraction format
+        granularity = dr.get("granularity", "annual")
+        expected_count = dr.get("expected_count") or 1
+
+        if granularity == "monthly_all" and expected_count == 12:
+            ordered_values: list[float | None] = []
+            ordered_labels: list[str] = []
+            for m in range(1, 13):
+                name = f"m{m:02d}"
+                if name in values and values[name] is not None:
+                    ordered_values.append(values[name])
+                    ordered_labels.append(f"month {m}")
+                else:
+                    if verbose:
+                        print(f"  Fast-path: {dr_id} incomplete monthly ({len(ordered_values)}/12)")
+                    unresolved_ids.append(dr_id)
+                    break
+            else:
+                extractions[dr_id] = {
+                    "values": ordered_values,
+                    "labels": ordered_labels,
+                    "source_file": table_entry.get("file", ""),
+                    "confidence": "deterministic",
+                }
+                notes_parts.append(f"{dr_id}: resolved deterministically from table {table_id}")
+
+        elif granularity == "multi_year_annual":
+            dr_years = dr.get("years") or []
+            ordered_values = []
+            ordered_labels = []
+            for y in dr_years:
+                name = f"y{y}"
+                if name in values and values[name] is not None:
+                    ordered_values.append(values[name])
+                    ordered_labels.append(str(y))
+                else:
+                    if verbose:
+                        print(f"  Fast-path: {dr_id} incomplete multi-year values")
+                    unresolved_ids.append(dr_id)
+                    break
+            else:
+                extractions[dr_id] = {
+                    "values": ordered_values,
+                    "labels": ordered_labels,
+                    "source_file": table_entry.get("file", ""),
+                    "confidence": "deterministic",
+                }
+                notes_parts.append(f"{dr_id}: resolved deterministically from table {table_id}")
+
+        else:
+            val = values.get(dr_id)
+            if val is None:
+                if verbose:
+                    print(f"  Fast-path: {dr_id} single value is None")
+                unresolved_ids.append(dr_id)
+                continue
+            extractions[dr_id] = {
+                "values": [val],
+                "labels": [dr.get("row_hint", "")],
+                "source_file": table_entry.get("file", ""),
+                "confidence": "deterministic",
+            }
+            notes_parts.append(f"{dr_id}: resolved deterministically from table {table_id}")
+
+    n_resolved = len(extractions)
+    n_unresolved = len(unresolved_ids)
+    if verbose:
+        n = len(data_requests)
+        if n_unresolved == 0:
+            print(f"  Fast-path: ALL {n} DR{'' if n == 1 else 's'} resolved deterministically ✓")
+        else:
+            print(
+                f"  Fast-path: {n_resolved}/{n} DR{'' if n == 1 else 's'} resolved, "
+                f"{n_unresolved} need LLM fallback: {unresolved_ids}"
+            )
+
+    return extractions, unresolved_ids

@@ -126,7 +126,7 @@ class TestBounceBackExtract:
             patch("solve.scout", return_value="hint"),
             patch("solve.decompose", return_value=spec),
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -171,7 +171,7 @@ class TestBounceBackExtract:
             patch("solve.scout", return_value=""),
             patch("solve.decompose", return_value=spec),
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -210,7 +210,7 @@ class TestBounceBackExtract:
             patch("solve.scout", return_value=""),
             patch("solve.decompose", return_value=spec),
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -252,7 +252,7 @@ class TestBounceBackDecompose:
             patch("solve.scout", return_value=""),
             patch("solve.decompose") as mock_decompose,
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -286,7 +286,7 @@ class TestBounceBackDecompose:
             patch("solve.scout", return_value="scout hint"),
             patch("solve.decompose") as mock_decompose,
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -325,7 +325,7 @@ class TestBounceBackDecompose:
             patch("solve.scout", return_value=""),
             patch("solve.decompose") as mock_decompose,
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", side_effect=[2602, 3500]),
             patch("solve.format_result", side_effect=["2,602", "3,500"]),
@@ -368,7 +368,7 @@ class TestBoundedRetries:
             patch("solve.scout", return_value=""),
             patch("solve.decompose", return_value=spec),
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -395,7 +395,7 @@ class TestBoundedRetries:
             patch("solve.scout", return_value=""),
             patch("solve.decompose", return_value=spec),
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -437,7 +437,7 @@ class TestBoundedRetries:
             patch("solve.scout", return_value=""),
             patch("solve.decompose", side_effect=expensive_decompose),
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -486,7 +486,7 @@ class TestBoundedRetries:
             patch("solve.scout", return_value=""),
             patch("solve.decompose", side_effect=counting_decompose),
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured", side_effect=counting_extract),
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -535,23 +535,23 @@ class TestThreadSafety:
         assert thread_conn_holder[0] is not main_conn
 
     def test_solve_fast_path_uses_thread_local_sqlite3(self):
-        """solve.py's _fp_conn() returns thread-local connections."""
-        from solve import _fp_conn
+        """find._conn() returns thread-local connections."""
+        from find import _conn
 
-        conn1 = _fp_conn()
-        conn2 = _fp_conn()
+        conn1 = _conn()
+        conn2 = _conn()
         # Same thread should get the same connection
         assert conn1 is conn2
 
     def test_solve_fast_path_different_threads_get_different_connections(self):
-        """Different threads get different _fp_conn() connections."""
-        from solve import _fp_conn
+        """Different threads get different _conn() connections."""
+        from find import _conn
 
-        main_conn = _fp_conn()
+        main_conn = _conn()
         thread_conn_holder: list[object] = [None]
 
         def get_conn_in_thread():
-            thread_conn_holder[0] = _fp_conn()
+            thread_conn_holder[0] = _conn()
 
         t = threading.Thread(target=get_conn_in_thread)
         t.start()
@@ -603,7 +603,7 @@ class TestPhaseRouting:
             patch("solve.scout", return_value=""),
             patch("solve.decompose") as mock_decompose,
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -639,7 +639,7 @@ class TestPhaseRouting:
             patch("solve.scout", return_value=""),
             patch("solve.decompose") as mock_decompose,
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -672,7 +672,7 @@ class TestPhaseRouting:
             patch("solve.scout", return_value=""),
             patch("solve.decompose") as mock_decompose,
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -710,7 +710,7 @@ class TestPhaseRouting:
             patch("solve.decompose") as mock_decompose,
             patch("solve.retrieve_bottomup", return_value={"v1": []}),
             patch("solve.retrieve_for_spec") as mock_retrieve,
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -782,7 +782,7 @@ class TestCPIQuestions:
             patch("solve.scout", return_value=""),
             patch("solve.decompose", return_value=spec),
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries(["v1", "v2"])),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1", "v2"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1", "v2"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602.0),
             patch("solve.format_result", return_value="2,602"),
@@ -826,7 +826,7 @@ class TestEndToEnd:
             patch("solve.scout", return_value="hint"),
             patch("solve.decompose", return_value=spec),
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),
@@ -852,7 +852,7 @@ class TestEndToEnd:
             patch("solve.scout", return_value=""),
             patch("solve.decompose", return_value=spec),
             patch("solve.retrieve_for_spec", return_value=_make_per_dr_entries()),
-            patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
+            patch("solve.try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
             patch("solve.compute_execute", return_value=2602),
             patch("solve.format_result", return_value="2,602"),

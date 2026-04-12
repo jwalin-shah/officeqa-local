@@ -26,7 +26,6 @@ uv run python batch_test.py               # batch evaluation with detailed metri
 uv run pytest                            # unit tests (tests/ directory)
 uv run python test_solve.py              # validation script
 uv run python build_ledger.py            # build ledger tables from corpus for offline reference
-uv run python retrieve.py --test-phase-a # test retrieval with pre-cached decompose
 uv run python extract.py --test-oracle --n 20  # test extraction with gold files
 uv run python eval_decompose.py          # evaluate decompose phase output
 ```
@@ -88,37 +87,49 @@ so column headers and row labels fall out of an HTML parse. Originals were copie
 legacy fallback; prefer the JSON corpus for all new code.
 
 ### File reference
-- `solve.py` — entry point (orchestrates scout → decompose → retrieve → extract → compute → verify pipeline via OpenAI client with DeepSeek). Implements deterministic fast-path: before LLM extraction, attempts to resolve all data_requests directly via `resolve_cells()` from find.py; if successful, skips LLM entirely. Supports `--eval [--n N] [--offset OFFSET] [--oracle] [--parallel P]` for batch evaluation.
-- `scout.py` — initial analysis/scouting of the question and corpus.
-- `build_ledger.py` — builds ledger.sqlite from corpus_json/ with cell normalization, deduplication, and views for fact retrieval. Table header parsing uses only contiguous header rows from the top (stops at first non-header row) to avoid joining sub-section headers into column paths. Mid-table `<th>` rows (embedded section headers) are kept as data rows, not silently dropped. Handles Type-B rolling-series tables (e.g., "March 1979 through February 1980") via title date-range parsing to infer year_extracted for month-only columns.
-- `ledger_paths.py` — utility for managing ledger database file paths across different environments and configurations.
-- `migrate_metrics_to_view.py` — utility for migrating ledger data.
-- `retrieve.py` — retrieval interface.
-- `retrieve_v2.py` — table-level retrieval implementation (three-channel FTS + metric + prose/footnote funnel with progressive synonym expansion, period-aware reranking scaled to gentle tiebreaker strength, and strategy-weighted ranking). Includes thread-safe caching with bounded retry loops (MAX_LLM_CALLS=6).
-- `extract.py` — structured per-request value extraction via LLM, with pre-extraction helpers for monthly values (`pre_extract_monthly_values()`) and CY row filtering (`filter_cy_rows()`). Post-extraction: unit normalization, ledger cross-check (`_verify_against_ledger`), cohort aggregate filtering (`_filter_cohort_aggregates`). Quality retry for missing/incomplete/labels-but-null DRs with expected-count validation and alternate rendering. Multi-year budget balancing via `_ensure_year_coverage()`. Renders prose/footnote entries alongside tables.
-- `external_data.py` — external data lookups (FX rates via fawazahmed0 CDN API with static fallback cache). Used by `_resolve_external_dr()` for `source: "fx"` data_requests.
-- `compute.py` — enum dispatcher with operation name alias normalization to handle LLM variation, dispatches known statistical operations (average, count, sum, min, max, stdev_sample, stdev_pop, median, percent_change, percent_of, ratio, difference, pearson_correlation, linear_regression, coefficient_of_variation, geometric_mean, harmonic_mean, gini, theil_index, kl_divergence), plus safe Python evaluation (restricted builtins, explicit imports) for custom expressions. Includes unit conversion utilities for handling table header units (thousands, millions, billions, percent) and normalizing extracted values to the target unit.
-- `verify.py` — post-compute answer verification with deterministic auto-fixes for units and fiscal/calendar year disambiguation.
-- `reward.py` — benchmark scoring.
-- `find.py` — deterministic cell lookup by row/col labels; implements `resolve_cells()` for direct ledger queries. Wired into solve.py as the deterministic fast-path before LLM extraction.
-- `deep_dive_audit.py` — diagnostic audit tool for analyzing system state and performance across the pipeline.
-- `test_solve.py` — validation script.
-- `test_recall_with_decompose.py` — test retrieval recall with pre-cached decompose output.
-- `test_variants.py` — validation script for testing variant configurations and system behavior.
-- `eval_decompose.py` — evaluation utilities for decompose phase output.
-- `eval_decompose_oracle.py` — evaluation utilities for decompose phase output with oracle/gold source files.
-- `eval_retrieve.py` — evaluation utilities for retrieval phase output.
-- `eval_ledger.py` — evaluation utilities for ledger-based reference.
-- `eval_attribution.py` — evaluation utilities for tracing answer attribution to sources.
-- `eval_suite.py` — coordinated evaluation suite runner for systematic benchmarking across phases.
-- `validate_decompose.py` — validation script for decompose phase output.
-- `batch_test.py` — batch evaluation runner with detailed metrics.
-- `analyze_retrieve_misses.py` — diagnostic script (with `--uids`, `--miss-k`, `--out`, `--summary-out` flags) for bucketing and analyzing retrieval misses by failure mode.
-- `analyze_retrieval_run.py` — diagnostic script for analyzing a single retrieval evaluation run.
-- `compare_eval_runs.py` — comparison tool for analyzing differences across multiple eval runs.
-- `retrieval_cycle.py` — diagnostic script for analyzing retrieval cycle behavior.
-- `build_index.py` — legacy corpus indexing (replaced by ledger approach).
-- `cpi.py` — CPI-U data 1930-2026.
+
+**Core pipeline** (what `solve.py` calls, in order):
+- `solve.py` — pipeline orchestrator: scout → decompose → retrieve → extract → compute → verify. Handles retry loops and LLM budget (MAX_LLM_CALLS=6). Supports `--eval [--n N] [--offset OFFSET] [--oracle] [--parallel P]`.
+- `scout.py` — deterministic pre-decompose index peek; grounds decompose with real corpus signals.
+- `decompose.py` — LLM call 1: question → `QuestionSpec` (data_requests + compute template + output format). Contains `DECOMPOSE_SYSTEM` prompt and all decompose helpers.
+- `retrieve_v2.py` — three-channel FTS + metric + prose/footnote funnel against `ledger.sqlite`. Progressive synonym expansion, period-aware reranking, strategy-weighted scoring.
+- `find.py` — deterministic ledger lookups: `resolve_cells()`, bottom-up cell search, `try_deterministic_fast_path()` (tries to skip LLM extraction entirely), vocabulary fetch for decompose.
+- `extract.py` — LLM call 2: grounded per-request value extraction from retrieved tables. Pre-extraction helpers for monthly values and CY/FY row filtering. Quality retry, ledger cross-check, cohort filtering.
+- `compute.py` — safe Python evaluation of the compute template. Dispatches named operations (sum, average, percent_change, linear_regression, …). Unit conversion utilities.
+- `verify.py` — LLM call 3: post-compute answer check with deterministic auto-fixes for unit scaling and fiscal/calendar year errors.
+
+**Data and scoring:**
+- `build_ledger.py` — builds `ledger.sqlite` from `corpus_json/`. Run once (or after corpus changes).
+- `ledger_paths.py` — resolves ledger path across environments.
+- `external_data.py` — FX rate lookups (fawazahmed0 CDN + static fallback).
+- `cpi.py` — BLS CPI-U data 1930-2026.
+- `reward.py` — benchmark scoring logic.
+
+**Evaluation and diagnostics:**
+- `eval_decompose.py` — run decompose() on benchmark questions and inspect specs.
+- `eval_decompose_oracle.py` — check whether decomposed spec points at gold data.
+- `eval_retrieve.py` — measure retrieval recall against gold source files.
+- `eval_ledger.py` — check ledger structural reachability of gold answers.
+- `eval_attribution.py` — stage-attributed failure analysis (where does the pipeline break?).
+- `eval_bottomup.py` — measure bottom-up cell search recall.
+- `eval_direct_oracle.py` / `eval_extract_oracle.py` / `eval_hybrid_oracle.py` — oracle upper-bound evals for each stage.
+- `eval_suite.py` — coordinated eval runner for commit-to-commit comparisons.
+- `batch_test.py` — parallel benchmark runner (wraps solve.py).
+- `compare_eval_runs.py` — diff two eval run JSONL files.
+- `analyze_retrieval_run.py` — analyze a single retrieval eval run.
+- `analyze_retrieve_misses.py` — bucket retrieval misses by failure mode.
+- `deep_dive_audit.py` — cross-phase diagnostic audit.
+- `validate_decompose.py` — structural sanity check on cached decompose specs.
+
+**Bench/validation scripts (root level):**
+- `test_solve.py` — smoke tests for pipeline entry points (no LLM calls).
+- `test_recall_with_decompose.py` — retrieval recall with pre-cached decompose specs.
+- `test_variants.py` — variant configuration testing.
+
+**Migrations (already applied, in `scripts/migrations/`):**
+- `migrate_metrics_to_view.py`, `migrate_fill_column_years.py`, `migrate_propagate_year.py`
+
+**Tests:**
 - `tests/conftest.py` — pytest fixtures for test setup.
 - `tests/test_build_ledger_row_year_propagate.py` — tests for ledger row year propagation logic.
 - `tests/test_extract_quality_retry.py` — tests for extraction quality retry mechanisms.
