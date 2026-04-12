@@ -344,15 +344,46 @@ def _row_hint_variants(row_hint: str) -> list[str]:
 
     variants = [norm]
     seen = {norm}
-    for key in _matched_synonym_keys(norm):
-        for synonym in SYNONYMS.get(key, ()):
-            candidate = normalize_metric_slug(
-                re.sub(rf"\b{re.escape(key)}\b", synonym, norm, count=1)
-            )
-            if not candidate or candidate in seen:
-                continue
-            seen.add(candidate)
-            variants.append(candidate)
+
+    no_hyphen = normalize_metric_slug(norm.replace("-", " "))
+    if no_hyphen and no_hyphen not in seen:
+        seen.add(no_hyphen)
+        variants.append(no_hyphen)
+
+    keys_found = list(_matched_synonym_keys(norm))
+    if keys_found:
+        if len(keys_found) <= 3:
+            current_combos = {norm}
+            for key in keys_found:
+                opts = [key] + list(SYNONYMS.get(key, ()))
+                next_combos = set()
+                for combo in current_combos:
+                    for opt in opts:
+                        cand = normalize_metric_slug(
+                            re.sub(rf"\b{re.escape(key)}\b", opt, combo, count=1)
+                        )
+                        if cand:
+                            next_combos.add(cand)
+                current_combos = next_combos
+            for c in current_combos:
+                if c not in seen:
+                    seen.add(c)
+                    variants.append(c)
+        else:
+            for key in keys_found:
+                for synonym in SYNONYMS.get(key, ()):
+                    candidate = normalize_metric_slug(
+                        re.sub(rf"\b{re.escape(key)}\b", synonym, norm, count=1)
+                    )
+                    if candidate and candidate not in seen:
+                        seen.add(candidate)
+                        variants.append(candidate)
+
+    stripped = re.sub(r"[-\s]+", "", norm)
+    if stripped and stripped not in seen:
+        seen.add(stripped)
+        variants.append(stripped)
+
     return variants
 
 
@@ -423,7 +454,71 @@ def _bulk_cell_probe(
     """
     params: tuple = (*tid_list, *slug_patterns)
     rows = conn.execute(sql, params).fetchall()
-    return {int(r[0]): (int(r[1] or 0), int(r[2] or 0)) for r in rows}
+
+    res = {int(r[0]): (int(r[1] or 0), int(r[2] or 0)) for r in rows}
+    if res:
+        return res
+
+    # Fallback: permissive token-set match on row_path
+    fallback_sql = f"""
+        WITH row_cells AS (
+            SELECT r.table_id AS table_id,
+                   r.id       AS row_id,
+                   r.row_path AS row_path,
+                   SUM(CASE WHEN c.numeric_value IS NOT NULL
+                              AND COALESCE(c.is_missing, 0) = 0
+                             THEN 1 ELSE 0 END) AS non_null_count
+              FROM table_rows r
+              LEFT JOIN cells c ON c.row_id = r.id AND c.table_id = r.table_id
+             WHERE r.table_id IN ({tid_placeholders})
+               AND r.row_path IS NOT NULL
+             GROUP BY r.table_id, r.id
+        )
+        SELECT table_id, row_id, row_path, non_null_count
+          FROM row_cells
+    """
+    all_rows = conn.execute(fallback_sql, tid_list).fetchall()
+
+    hint_tokens_list = []
+    for rh in row_hints:
+        tokens = set(re.findall(r"[a-z0-9]+", rh.lower()))
+        if tokens:
+            hint_tokens_list.append(tokens)
+
+    if not hint_tokens_list:
+        return {}
+
+    matching_rows_by_table = {}
+    for r in all_rows:
+        t_id = int(r[0])
+        r_id = int(r[1])
+        path = str(r[2] or "").lower()
+        path_tokens = set(re.findall(r"[a-z0-9]+", path))
+
+        match = False
+        for hint_tokens in hint_tokens_list:
+            if hint_tokens.issubset(path_tokens):
+                match = True
+                break
+            # Or if "most" tokens match (e.g., all but one, and at least 3 tokens)
+            if (
+                len(hint_tokens) >= 3
+                and len(hint_tokens.intersection(path_tokens)) >= len(hint_tokens) - 1
+            ):
+                match = True
+                break
+
+        if match:
+            if t_id not in matching_rows_by_table:
+                matching_rows_by_table[t_id] = []
+            matching_rows_by_table[t_id].append((r_id, int(r[3] or 0)))
+
+    for t_id, t_rows in matching_rows_by_table.items():
+        matching_row_count = len(t_rows)
+        best_row_non_null = max(non_null for _, non_null in t_rows) if t_rows else 0
+        res[t_id] = (matching_row_count, best_row_non_null)
+
+    return res
 
 
 def _merge_ranked_rows(*groups: list[sqlite3.Row], top_n: int) -> list[sqlite3.Row]:
