@@ -162,19 +162,19 @@ def test_file_year_bonus_none_year():
 
 
 def test_strategy_score_nudge_metric_primary_exact():
-    assert _strategy_score_nudge(None, "primary_exact") == 0.08
+    assert _strategy_score_nudge(None, "primary_exact") == 0.80
 
 
 def test_strategy_score_nudge_fts_exact_year_filter():
-    assert _strategy_score_nudge("exact_year_filter", None) == 0.06
+    assert _strategy_score_nudge("exact_year_filter", None) == 0.60
 
 
 def test_strategy_score_nudge_alt_metric_strips_prefix():
-    assert _strategy_score_nudge(None, "alt:primary_exact") == 0.08
+    assert _strategy_score_nudge(None, "alt:primary_exact") == 0.80
 
 
 def test_strategy_score_nudge_dual_channel_uses_max_not_sum():
-    assert _strategy_score_nudge("exact_year_filter", "primary_exact") == 0.08
+    assert _strategy_score_nudge("exact_year_filter", "primary_exact") == 0.80
 
 
 def test_strategy_score_nudge_unknown_strategies():
