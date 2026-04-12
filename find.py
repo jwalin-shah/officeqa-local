@@ -1204,7 +1204,20 @@ def resolve_cells(
     if a newer bulletin publishes a revised value for the same
     (signature, row_path, col_path, data_year) tuple; when it does, the
     newer value wins and the supersession is recorded in debug.
+
+    ``vintage``: when it is the string ``latest`` (default), superseding
+    rows in newer bulletins are followed via ``_canonical_cell``; any
+    other value keeps the committed bulletin cell only.
+
+    Cells whose ``parse_status`` is neither ``ok`` nor ``missing`` (for
+    example ``text`` or ``unparseable``) resolve to ``None`` with
+    ``status: "unparseable"`` in that cell's ``debug`` entry. Malformed per-cell
+    ``table_id`` values are reported as ``bad_table_id`` instead of
+    raising.
     """
+    if not cells:
+        return {"values": {}, "debug": {}}
+
     conn = _conn()
     values: dict[str, float | None] = {}
     debug: dict[str, dict] = {}
@@ -1216,9 +1229,16 @@ def resolve_cells(
 
     for i, c in enumerate(cells):
         name = expr_names[i] if use_positional else _cell_name(c, f"c{i}")
-        tid = int(c.get("table_id", table_id))
-        rleaf = c.get("row_leaf", "")
-        cleaf = c.get("col_leaf", "")
+        raw_tid = c.get("table_id", table_id)
+        try:
+            tid = int(raw_tid)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            values[name] = None
+            debug[name] = {"status": "bad_table_id", "table_id": raw_tid}
+            continue
+
+        rleaf = str(c.get("row_leaf") or "")
+        cleaf = str(c.get("col_leaf") or "")
 
         row = conn.execute(
             "SELECT id FROM table_rows WHERE table_id=? AND row_leaf=? "
@@ -1257,6 +1277,26 @@ def resolve_cells(
         committed_value = cell["numeric_value"]
         committed_raw = cell["raw_value"]
         committed_parse = cell["parse_status"]
+
+        if committed_parse not in ("ok", "missing"):
+            values[name] = None
+            debug[name] = {
+                "status": "unparseable",
+                "parse": committed_parse,
+                "row_id": row["id"],
+                "col_id": col["id"],
+            }
+            continue
+
+        if committed_parse == "ok" and committed_value is None:
+            values[name] = None
+            debug[name] = {
+                "status": "null_numeric",
+                "parse": committed_parse,
+                "row_id": row["id"],
+                "col_id": col["id"],
+            }
+            continue
 
         canon = _canonical_cell(conn, tid, row["id"], col["id"]) if vintage == "latest" else None
         use_canon = False
@@ -1368,6 +1408,73 @@ def _build_retrieval_entry(table_id: int) -> dict | None:
     }
 
 
+def effective_row_hint_for_bottomup(
+    row_hint: str,
+    *,
+    label: str = "",
+    keywords: list[str] | None = None,
+    max_chars: int = 120,
+) -> str:
+    """Derive a non-empty row string for slug fuzzy-matching when decompose omits ``row_hint``.
+
+    Preference order: stripped ``row_hint`` → first non-empty keyword →
+    truncated normalized ``label``. Returns ``\"\"`` if nothing usable remains.
+    """
+    s = (row_hint or "").strip()
+    if s:
+        return s[:max_chars]
+    for kw in keywords or []:
+        if isinstance(kw, str) and (t := kw.strip()):
+            return t[:max_chars]
+    lab = " ".join((label or "").split())
+    if lab:
+        return lab[:max_chars]
+    return ""
+
+
+def _collect_bottomup_slugs(row_hint: str, topic: str, vocab: list[str]) -> list[str]:
+    """Fuzzy-match ``row_hint`` against ``vocab``; if that yields nothing, mine ``topic``."""
+    seen: set[str] = set()
+    out: list[str] = []
+
+    def _add_fuzzy(query: str, *, limit: int, cutoff: int) -> None:
+        q = query.lower().strip()
+        if not q:
+            return
+        for m in process.extract(
+            q,
+            vocab,
+            scorer=fuzz.token_set_ratio,
+            limit=limit,
+            score_cutoff=cutoff,
+        ):
+            slug = m[0]
+            if slug not in seen:
+                seen.add(slug)
+                out.append(slug)
+
+    _add_fuzzy(row_hint, limit=100, cutoff=60)
+    if out:
+        return out
+
+    topic_s = (topic or "").strip()
+    if not topic_s:
+        return out
+
+    _add_fuzzy(topic_s[:240], limit=80, cutoff=55)
+    if out:
+        return out
+
+    for tok in _tokens(topic):
+        _add_fuzzy(tok, limit=40, cutoff=55)
+
+    toks = _tokens(topic)
+    for i in range(len(toks) - 1):
+        _add_fuzzy(f"{toks[i]} {toks[i + 1]}", limit=30, cutoff=55)
+
+    return out
+
+
 def retrieve_bottomup(
     spec: dict,
     question: str,
@@ -1387,18 +1494,23 @@ def retrieve_bottomup(
 
     for dr in data_requests:
         dr_id = dr.get("id", "?")
-        row_hint = dr.get("row_hint", "")
-        if not row_hint:
+        label = dr.get("label", "") or ""
+        row_raw = dr.get("row_hint", "") or ""
+        eff = effective_row_hint_for_bottomup(
+            row_raw,
+            label=label,
+            keywords=dr.get("keywords"),
+        )
+        if not eff:
             per_dr[dr_id] = []
             continue
 
         years = dr.get("years") or []
         col_year = years[0] if years else None
-        label = dr.get("label", "")
-        topic = " ".join(filter(None, [label, row_hint, question[:80]]))
+        topic = " ".join(filter(None, [label, row_raw, question[:80]]))
 
         hits = search_cells_bottomup(
-            row_hint=row_hint,
+            row_hint=eff,
             col_year=col_year,
             topic=topic,
             limit=top_k,
@@ -1431,7 +1543,9 @@ def search_cells_bottomup(
     (file_year DESC, file_month DESC) — so the latest-published bulletin wins.
 
     Row matching uses the in-memory slug vocab + rapidfuzz (cached, ~15MB) so
-    all SQL lookups are exact indexed joins — no LIKE scans.
+    all SQL lookups are exact indexed joins — no LIKE scans. When ``row_hint``
+    is empty but ``topic`` carries keywords or a label, slugs are inferred from
+    ``topic`` (phrase, tokens, then token pairs) with a slightly lower cutoff.
 
     Column year is matched against col.year_extracted (indexed) first; if that
     returns nothing, falls back to col.col_path LIKE '%year%' (handles historical
@@ -1439,23 +1553,14 @@ def search_cells_bottomup(
     """
     conn = _conn()
 
-    # ── Step 1: fuzzy-match row_hint against the full slug vocabulary ──────
+    # ── Step 1: fuzzy-match row_hint (then topic) against slug vocabulary ───
     # _load_slug_vocab() is cached after first call (~2-3s). Subsequent calls
     # are free. We use token_set_ratio so "National defense" matches
     # "budget national defense", "national defense and veterans", etc.
     # Slugs in the vocab use spaces ("budget national defense"), so match
     # with spaces — NOT underscores — for token_set_ratio to work correctly.
-    hint_lower = row_hint.lower().strip()
-    vocab, slug_to_tables = _load_slug_vocab()
-
-    fuzzy_matches = process.extract(
-        hint_lower,
-        vocab,
-        scorer=fuzz.token_set_ratio,
-        limit=100,
-        score_cutoff=60,
-    )
-    matched_slugs = [m[0] for m in fuzzy_matches]
+    vocab, _slug_to_tables = _load_slug_vocab()
+    matched_slugs = _collect_bottomup_slugs(row_hint, topic, vocab)
 
     if not matched_slugs:
         return []

@@ -20,7 +20,13 @@ from openai import OpenAI
 from compute import ComputeError, format_result, parse_unit, validate_extractions
 from compute import execute as compute_execute
 from extract import extract_structured
-from find import fetch_vocabulary, resolve_cells, retrieve_bottomup, search_cells_bottomup
+from find import (
+    effective_row_hint_for_bottomup,
+    fetch_vocabulary,
+    resolve_cells,
+    retrieve_bottomup,
+    search_cells_bottomup,
+)
 from ledger_paths import get_ledger_sqlite_path
 from retrieve_v2 import retrieve as retrieve_v2
 from scout import scout
@@ -274,18 +280,34 @@ def _try_deterministic_fast_path(
             # This recovers from: (a) row_hint that doesn't match any slug/leaf in the
             # top-down retrieved table, (b) year_extracted not indexed for historical
             # columns, (c) multiple bulletins — always picks file_year DESC.
-            row_hint = dr.get("row_hint", "")
+            row_raw = (dr.get("row_hint") or "").strip()
             dr_years = dr.get("years") or []
             col_year = dr_years[0] if dr_years else None
             keywords = dr.get("keywords") or []
-            topic = " ".join(keywords[:6]) if keywords else row_hint
+            label_s = (dr.get("label") or "").strip()
+
+            topic_parts = [
+                str(k).strip() for k in keywords[:6] if isinstance(k, str) and str(k).strip()
+            ]
+            if row_raw:
+                topic_parts.append(row_raw)
+            elif not topic_parts and label_s:
+                topic_parts.append(label_s)
+            topic = " ".join(topic_parts) if topic_parts else label_s
+
             granularity = dr.get("granularity", "annual")
 
-            if row_hint and granularity in ("annual", "specific_month", "unknown", None):
+            eff_row = effective_row_hint_for_bottomup(
+                row_raw,
+                label=dr.get("label") or "",
+                keywords=keywords if keywords else None,
+            )
+
+            if eff_row and granularity in ("annual", "specific_month", "unknown", None):
                 bu_hits = search_cells_bottomup(
-                    row_hint=row_hint,
+                    row_hint=eff_row,
                     col_year=col_year,
-                    topic=topic,
+                    topic=topic or eff_row,
                     limit=5,
                 )
                 if bu_hits:

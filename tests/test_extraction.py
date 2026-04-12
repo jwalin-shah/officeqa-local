@@ -3,6 +3,9 @@
 Also tests for the deterministic fast-path in solve.py (_try_deterministic_fast_path),
 monthly pre-extraction, and CY row filtering."""
 
+import sqlite3
+from contextlib import suppress
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from extract import (
@@ -937,6 +940,258 @@ def test_fast_path_logging_on_failure(capsys):
 
     captured = capsys.readouterr()
     assert "Fast-path" in captured.out or "fast-path" in captured.out.lower()
+
+
+def _find_close_thread_conn(find_mod) -> None:
+    conn = getattr(find_mod._TLS, "conn", None)
+    if conn is not None:
+        with suppress(OSError):
+            conn.close()
+        delattr(find_mod._TLS, "conn")
+
+
+def _fast_path_seed_min_ledger(db_path: Path) -> None:
+    """Minimal tables/rows/columns/cells DDL for find.resolve_cells tests."""
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE tables (
+          id INTEGER PRIMARY KEY,
+          signature TEXT,
+          file TEXT,
+          file_year INTEGER,
+          file_month INTEGER,
+          parse_ok INTEGER,
+          table_kind TEXT
+        );
+        CREATE TABLE table_rows (
+          id INTEGER PRIMARY KEY,
+          table_id INTEGER,
+          row_leaf TEXT,
+          row_index INTEGER,
+          row_path TEXT
+        );
+        CREATE TABLE table_columns (
+          id INTEGER PRIMARY KEY,
+          table_id INTEGER,
+          col_leaf TEXT,
+          col_index INTEGER,
+          col_path TEXT,
+          year_extracted INTEGER
+        );
+        CREATE TABLE cells (
+          table_id INTEGER,
+          row_id INTEGER,
+          col_id INTEGER,
+          raw_value TEXT,
+          numeric_value REAL,
+          parse_status TEXT
+        );
+        INSERT INTO tables VALUES (1, 'sig1', 'f.json', 1940, 1, 1, 'data');
+        INSERT INTO table_rows VALUES (10, 1, 'Defense', 0, 'Defense');
+        INSERT INTO table_columns VALUES (20, 1, '1940', 1, 'Year 1940', 1940);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_fast_path_resolve_cells_empty():
+    """resolve_cells with no cell specs returns empty dicts without touching SQLite."""
+    import find as find_mod
+
+    out = find_mod.resolve_cells(1, [], vintage="committed")
+    assert out == {"values": {}, "debug": {}}
+
+
+def test_fast_path_resolve_cells_ok_memory_ledger(tmp_path, monkeypatch):
+    """resolve_cells reads ok/missing rows from a temp ledger (vintage != latest skips canonical SQL)."""
+    import find as find_mod
+
+    db = tmp_path / "ledger.sqlite"
+    _fast_path_seed_min_ledger(db)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO cells VALUES (1, 10, 20, '123.4', 123.4, 'ok')",
+    )
+    conn.commit()
+    conn.close()
+
+    _find_close_thread_conn(find_mod)
+    monkeypatch.setattr(find_mod, "LEDGER_PATH", db)
+
+    out = find_mod.resolve_cells(
+        1,
+        [{"row_leaf": "Defense", "col_leaf": "1940", "name": "v1"}],
+        vintage="committed",
+    )
+    assert out["values"]["v1"] == 123.4
+    assert out["debug"]["v1"]["status"] == "ok"
+
+
+def test_fast_path_resolve_cells_unparseable_memory_ledger(tmp_path, monkeypatch):
+    """Non-ok/missing parse_status yields None and unparseable debug (fast-path treats as unresolved)."""
+    import find as find_mod
+
+    db = tmp_path / "ledger.sqlite"
+    _fast_path_seed_min_ledger(db)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO cells VALUES (1, 10, 20, 'n/a', NULL, 'unparseable')",
+    )
+    conn.commit()
+    conn.close()
+
+    _find_close_thread_conn(find_mod)
+    monkeypatch.setattr(find_mod, "LEDGER_PATH", db)
+
+    out = find_mod.resolve_cells(
+        1,
+        [{"row_leaf": "Defense", "col_leaf": "1940", "name": "v1"}],
+        vintage="committed",
+    )
+    assert out["values"]["v1"] is None
+    assert out["debug"]["v1"]["status"] == "unparseable"
+
+
+def test_fast_path_resolve_cells_bad_table_id_no_raise(tmp_path, monkeypatch):
+    """Malformed per-cell table_id is surfaced as bad_table_id instead of raising."""
+    import find as find_mod
+
+    db = tmp_path / "ledger.sqlite"
+    db.write_bytes(b"")
+    _find_close_thread_conn(find_mod)
+    monkeypatch.setattr(find_mod, "LEDGER_PATH", db)
+
+    out = find_mod.resolve_cells(
+        1,
+        [{"row_leaf": "Defense", "col_leaf": "1940", "table_id": "not-an-int", "name": "v1"}],
+        vintage="committed",
+    )
+    assert out["values"]["v1"] is None
+    assert out["debug"]["v1"]["status"] == "bad_table_id"
+
+
+def test_fast_path_resolve_cells_null_numeric_ok_parse_memory_ledger(tmp_path, monkeypatch):
+    """parse_status ok with NULL numeric is treated as an explicit null_numeric miss."""
+    import find as find_mod
+
+    db = tmp_path / "ledger.sqlite"
+    _fast_path_seed_min_ledger(db)
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO cells VALUES (1, 10, 20, '', NULL, 'ok')",
+    )
+    conn.commit()
+    conn.close()
+
+    _find_close_thread_conn(find_mod)
+    monkeypatch.setattr(find_mod, "LEDGER_PATH", db)
+
+    out = find_mod.resolve_cells(
+        1,
+        [{"row_leaf": "Defense", "col_leaf": "1940", "name": "v1"}],
+        vintage="committed",
+    )
+    assert out["values"]["v1"] is None
+    assert out["debug"]["v1"]["status"] == "null_numeric"
+
+
+def test_fast_path_effective_row_hint_for_bottomup_order():
+    """effective_row_hint_for_bottomup prefers row_hint, then keywords, then label."""
+    from find import effective_row_hint_for_bottomup
+
+    assert effective_row_hint_for_bottomup("  Foo  ") == "Foo"
+    assert effective_row_hint_for_bottomup("", keywords=["  bar ", "baz"]) == "bar"
+    assert effective_row_hint_for_bottomup("", label="  Qux  year\nstuff") == "Qux year stuff"
+    assert effective_row_hint_for_bottomup("", label="", keywords=[]) == ""
+
+
+def test_fast_path_bottomup_called_with_keyword_when_row_hint_empty():
+    """Empty row_hint but non-empty keywords still triggers bottom-up with effective row string."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    spec["data_requests"][0]["row_hint"] = ""
+    spec["data_requests"][0]["keywords"] = ["national defense expenditures", "1940"]
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    bu_hit = {
+        "table_id": 9,
+        "file": "tb.json",
+        "file_year": 1941,
+        "numeric_value": 42.0,
+        "row_leaf": "National defense",
+        "col_leaf": "1940",
+    }
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch(
+            "solve._build_cells_for_dr",
+            return_value=[{"row_leaf": "", "col_leaf": "", "name": "v1"}],
+        ),
+        patch(
+            "solve.resolve_cells",
+            return_value={"values": {"v1": None}, "debug": {"v1": {"status": "label_miss"}}},
+        ),
+        patch("solve.search_cells_bottomup") as mock_bu,
+    ):
+        mock_bu.return_value = [bu_hit]
+        resolved, unresolved = _try_deterministic_fast_path(spec, per_dr, verbose=False)
+
+    mock_bu.assert_called_once()
+    _args, kwargs = mock_bu.call_args
+    assert kwargs["row_hint"] == "national defense expenditures"
+    assert "national defense" in kwargs["topic"] and "1940" in kwargs["topic"]
+    assert "v1" in resolved
+    assert resolved["v1"]["values"] == [42.0]
+    assert resolved["v1"]["confidence"] == "bottomup"
+    assert unresolved == []
+
+
+def test_fast_path_bottomup_called_with_label_when_row_hint_and_keywords_empty():
+    """With row_hint and keywords empty, label alone can drive bottom-up row + topic strings."""
+    from solve import _try_deterministic_fast_path
+
+    spec = _make_annual_spec()
+    spec["data_requests"][0]["row_hint"] = ""
+    spec["data_requests"][0]["keywords"] = []
+    spec["data_requests"][0]["label"] = "National defense outlays 1940"
+    entries = [_make_table_entry(table_id=42)]
+    per_dr = {"v1": entries}
+
+    bu_hit = {
+        "table_id": 9,
+        "file": "tb.json",
+        "file_year": 1941,
+        "numeric_value": 7.0,
+        "row_leaf": "National defense",
+        "col_leaf": "1940",
+    }
+
+    with (
+        patch("solve._get_table_id_from_entry", return_value=42),
+        patch(
+            "solve._build_cells_for_dr",
+            return_value=[{"row_leaf": "", "col_leaf": "", "name": "v1"}],
+        ),
+        patch(
+            "solve.resolve_cells",
+            return_value={"values": {"v1": None}, "debug": {"v1": {"status": "label_miss"}}},
+        ),
+        patch("solve.search_cells_bottomup") as mock_bu,
+    ):
+        mock_bu.return_value = [bu_hit]
+        resolved, unresolved = _try_deterministic_fast_path(spec, per_dr, verbose=False)
+
+    mock_bu.assert_called_once()
+    _args, kwargs = mock_bu.call_args
+    assert kwargs["row_hint"] == "National defense outlays 1940"
+    assert kwargs["topic"] == "National defense outlays 1940"
+    assert resolved["v1"]["values"] == [7.0]
+    assert unresolved == []
 
 
 def test_fast_path_with_run_extract_and_compute():
