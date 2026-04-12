@@ -188,6 +188,7 @@ def _parse_uids(raw: str) -> set[str]:
 
 
 def main():
+    sys.stdout.reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("--specs", type=Path, default=CACHE)
     ap.add_argument("--out", type=Path, default=Path("retrieve_eval.jsonl"))
@@ -202,7 +203,7 @@ def main():
     if selected:
         rows = [r for r in rows if r.get("uid") in selected]
     usable = [r for r in rows if r.get("spec") and r.get("gold_files")]
-    print(f"Loaded {len(rows)} cached specs; {len(usable)} usable (non-null spec + gold)")
+    print(f"Loaded {len(rows)} cached specs; {len(usable)} usable (non-null spec + gold)", flush=True)
 
     results: list[dict] = []
     t0 = time.time()
@@ -220,7 +221,7 @@ def main():
             else:
                 rank = res["first_hit_rank"]
                 mark = f"@{rank:>2}" if rank else "MISS"
-            print(f"  [{done:>3}/{len(usable)}] {mark} {res['uid']}")
+            print(f"  [{done:>3}/{len(usable)}] {mark} {res['uid']}", flush=True)
 
     n = sum(1 for r in results if not r.get("error") and not r.get("skipped"))
     h5 = sum(1 for r in results if r.get("hit_at_5"))

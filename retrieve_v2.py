@@ -1779,41 +1779,87 @@ def _find_candidate_families(conn: sqlite3.Connection, ctx: _RetrievalContext) -
     return candidate_fids
 
 
+_INSTANCES_PER_FAMILY = 5  # max year-matching instances to keep per family
+
+
 def _get_best_instances_for_families(
-    conn: sqlite3.Connection, families: set[str], target_years: list[int]
+    conn: sqlite3.Connection,
+    families: set[str],
+    target_years: list[int],
+    row_hints: list[str] | None = None,
 ) -> set[int]:
+    """Return the set of table IDs to search within candidate families.
+
+    Strategy (with target_years):
+      - For each candidate family, find all tables that contain the target year
+        in their actual column/row data, then keep up to _INSTANCES_PER_FAMILY
+        of them (most recent first). This keeps the pool bounded (~N*families)
+        while ensuring the gold file is included if its family was found.
+      - Row hints are NOT used as a hard filter here — they act as scoring
+        signals in _bulk_cell_probe during reranking. Using them as a gate
+        causes regressions when slug matching is imprecise.
+
+    No-year fallback: latest instance per family (original behavior).
+    """
     if not families:
         return set()
 
     fid_ph = ",".join("?" * len(families))
     fid_list = list(families)
 
-    if target_years:
-        # Per (family, year): pick the latest bulletin instance that actually contains
-        # that year in its columns/rows. Precomputed as best_table_id in table_family_years.
-        # Falls back to latest_table_id if best_table_id column not yet built.
-        has_best = conn.execute(
-            "SELECT COUNT(*) FROM pragma_table_info('table_family_years') WHERE name='best_table_id'"
-        ).fetchone()[0]
-        if has_best:
-            year_ph = ",".join("?" * len(target_years))
-            rows = conn.execute(
-                f"""SELECT DISTINCT best_table_id FROM table_family_years
-                    WHERE family_id IN ({fid_ph}) AND year IN ({year_ph})
-                    AND best_table_id IS NOT NULL""",
-                (*fid_list, *target_years),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                f"SELECT latest_table_id FROM table_families WHERE family_id IN ({fid_ph}) AND latest_table_id IS NOT NULL",
-                fid_list,
-            ).fetchall()
-    else:
+    if not target_years:
         rows = conn.execute(
             f"SELECT latest_table_id FROM table_families WHERE family_id IN ({fid_ph}) AND latest_table_id IS NOT NULL",
             fid_list,
         ).fetchall()
-    return {int(r[0]) for r in rows}
+        return {int(r[0]) for r in rows}
+
+    year_ph = ",".join("?" * len(target_years))
+
+    # Get all year-matching tables per family, ordered by proximity to target year.
+    # Use ROW_NUMBER to cap at _INSTANCES_PER_FAMILY per family.
+    # Order by ABS(file_year - target_year) so bulletins published closest to the
+    # data year rank first — this beats pure recency for historical questions where
+    # a 1958 bulletin containing 1955 data beats a 2020 bulletin with 1955 data.
+    min_year = min(target_years)
+    rows = conn.execute(
+        f"""
+        SELECT id FROM (
+            SELECT t.id,
+                   t.family_id,
+                   t.file_year,
+                   t.file_month,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY t.family_id
+                       ORDER BY ABS(t.file_year - {min_year}) ASC,
+                                t.file_month DESC
+                   ) AS rn
+              FROM tables t
+             WHERE t.family_id IN ({fid_ph})
+               AND t.id IN (
+                     SELECT DISTINCT table_id FROM table_columns
+                      WHERE year_extracted IN ({year_ph})
+                     UNION
+                     SELECT DISTINCT table_id FROM table_rows
+                      WHERE year_extracted IN ({year_ph})
+                   )
+        )
+        WHERE rn <= {_INSTANCES_PER_FAMILY}
+        """,
+        (*fid_list, *target_years, *target_years),
+    ).fetchall()
+
+    if rows:
+        return {int(r[0]) for r in rows}
+
+    # Fallback: no year-data match found — use precomputed best per family/year
+    year_rows = conn.execute(
+        f"""SELECT DISTINCT best_table_id FROM table_family_years
+            WHERE family_id IN ({fid_ph}) AND year IN ({year_ph})
+            AND best_table_id IS NOT NULL""",
+        (*fid_list, *target_years),
+    ).fetchall()
+    return {int(r[0]) for r in year_rows}
 
 
 def _run_search_channels(conn: sqlite3.Connection, ctx: _RetrievalContext, limit_ids: set[int]):
@@ -1916,12 +1962,10 @@ def _rank_candidates(
     }
     max_best_row_cells = max((v[1] for v in probe_stats.values()), default=0)
 
-    superseded_ids = set()
-    try:
-        rows = conn.execute("SELECT table_id FROM supersessions").fetchall()
-        superseded_ids = {int(r[0]) for r in rows}
-    except Exception:
-        pass
+    # NOTE: supersessions view is too expensive (full facts_ranked window scan).
+    # Skip the penalty — it was a 0.30 score nudge for older duplicate tables,
+    # not a correctness gate.
+    superseded_ids: set[int] = set()
 
     final_ranked = []
     for tid in all_ids:

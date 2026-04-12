@@ -80,6 +80,16 @@ Use raw tools when needed:
 - Prefer `rtk pytest ...` or `rtk err ...` for compact output first.
 - If compact output hides needed detail, rerun the exact raw command once.
 
+## Real-Time Progress Output
+
+Every eval/test loop **must** print one line per question/item as it completes — not at the end.
+
+Rules:
+- Use `print(..., flush=True)` on every per-item progress line.
+- Call `sys.stdout.reconfigure(line_buffering=True)` at the top of `main()` in all eval scripts.
+- Never buffer results and print only at the end — background tasks and monitors depend on live output.
+- In `concurrent.futures` loops, print inside the `as_completed` callback, not after the pool closes.
+
 ## Repo-Specific Notes
 
 - Primary corpus is `corpus_json/`; `corpus/` is legacy fallback.
