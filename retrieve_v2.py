@@ -21,6 +21,7 @@ once the ledger-backed funnel pulled ahead on head-to-head recall.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -31,7 +32,11 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from ledger_paths import get_ledger_sqlite_path
+
+load_dotenv()
 
 _reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
 if callable(_reconfigure_stdout):
@@ -2158,6 +2163,125 @@ def _build_entries(conn, ctx, ranked, pf_hits, top_k, dedupe_by_file, max_per_fi
     return entries
 
 
+_RERANK_SCORE_GAP = 0.08  # fire LLM rerank only when top-2 gap is below this
+_RERANK_EPSILON = 0.5  # score bump applied to LLM-picked candidate
+_MAX_RERANK_CANDIDATES = 5  # max candidates sent to LLM
+
+
+def _llm_rerank_candidates(
+    ranked: list,
+    conn: sqlite3.Connection,
+    question: str,
+    llm_counter: dict | None,
+    max_llm_calls: int,
+) -> list:
+    """Optionally reorder ranked candidates using a cheap LLM call.
+
+    Fires only when:
+      - llm_counter budget allows (leaves room for extract + verify retries)
+      - top-2 deterministic score gap < _RERANK_SCORE_GAP (ambiguous top)
+      - at least 2 candidates exist
+
+    On success: bumps the picked candidate's score to the top.
+    On failure / null pick / parse error: returns original order.
+    """
+    if len(ranked) < 2:
+        return ranked
+
+    top_score = ranked[0][0]
+    second_score = ranked[1][0]
+    if (top_score - second_score) >= _RERANK_SCORE_GAP:
+        return ranked  # deterministic funnel is confident enough
+
+    if llm_counter is None or llm_counter.get("count", 0) >= max_llm_calls - 2:
+        return ranked  # out of budget
+
+    # Build compact candidate cards (max _MAX_RERANK_CANDIDATES)
+    cards: list[str] = []
+    id_to_rank_idx: dict[int, int] = {}
+    for rank_idx, entry in enumerate(ranked[:_MAX_RERANK_CANDIDATES]):
+        _score, row, _state, _probe, _fts_v, _met_v, _fts_trace, _met_trace = entry
+        tid = int(row["id"])
+        id_to_rank_idx[tid] = rank_idx
+
+        row_labels = conn.execute(
+            "SELECT DISTINCT row_path FROM table_rows WHERE table_id = ? ORDER BY row_index LIMIT 10",
+            (tid,),
+        ).fetchall()
+        unique_labels: list[str] = []
+        seen_labels: set[str] = set()
+        for (lab,) in row_labels:
+            clean = (lab or "").strip()
+            if clean and clean not in seen_labels:
+                seen_labels.add(clean)
+                unique_labels.append(clean)
+            if len(unique_labels) >= 3:
+                break
+
+        title = (row["title"] or "").strip()
+        section = (row["section"] or "").strip()
+        top_rows_str = ", ".join(unique_labels) if unique_labels else "(none)"
+        cards.append(
+            f'[id={tid}] Title: "{title}" | Section: "{section}" | Top rows: {top_rows_str}'
+        )
+
+    candidate_cards = "\n".join(cards)
+    system_prompt = (
+        "You are a Treasury bulletin analyst. Given a question and a list of candidate tables, "
+        "output the ID of the one table that most directly answers the question. "
+        'Output ONLY valid JSON: {"picked": "<table_id>", "reason": "one sentence"}. '
+        'If none match, output {"picked": null, "reason": "..."}.'
+    )
+    user_prompt = f"Question: {question}\n\nCandidates:\n{candidate_cards}"
+
+    try:
+        from openai import OpenAI
+
+        _rerank_client = OpenAI(
+            api_key=os.getenv("DEDALUS_API_KEY"),
+            base_url=os.getenv("DEDALUS_API_BASE"),
+        )
+        model = os.getenv("OFFICEQA_MODEL", "deepseek/deepseek-chat")
+        resp = _rerank_client.chat.completions.create(
+            model=model,
+            max_tokens=80,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        llm_counter["count"] = llm_counter.get("count", 0) + 1
+        raw = (resp.choices[0].message.content or "").strip()
+
+        # Strip markdown fences if present
+        raw = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
+        parsed = json.loads(raw)
+        picked_raw = parsed.get("picked")
+        if picked_raw is None:
+            return ranked  # LLM said no match
+
+        picked_id = int(picked_raw)
+        if picked_id not in id_to_rank_idx:
+            return ranked  # unknown id
+
+        pick_idx = id_to_rank_idx[picked_id]
+        if pick_idx == 0:
+            return ranked  # already top — no reorder needed
+
+        # Bump the picked entry's score above the current top
+        new_ranked = list(ranked)
+        old_entry = new_ranked[pick_idx]
+        boosted_score = new_ranked[0][0] + _RERANK_EPSILON
+        new_entry = (boosted_score,) + old_entry[1:]
+        new_ranked.pop(pick_idx)
+        new_ranked.insert(0, new_entry)
+        return new_ranked
+
+    except Exception:
+        return ranked  # silent fallback
+
+
 def retrieve(
     plan: dict | None,
     question: str,
@@ -2168,6 +2292,8 @@ def retrieve(
     vintage: str = "latest",
     max_per_file: int | None = None,
     debug_meta: dict | None = None,
+    llm_counter: dict | None = None,
+    max_llm_calls: int = 6,
 ) -> list[dict]:
     conn = _ledger_conn()
     ctx = _RetrievalContext(plan, question)
@@ -2185,6 +2311,7 @@ def retrieve(
 
     fts_trace, metric_trace, pf_hits = _run_search_channels(conn, ctx, limit_ids)
     ranked = _rank_candidates(conn, ctx, fts_trace, metric_trace, limit_ids, top_k)
+    ranked = _llm_rerank_candidates(ranked, conn, question, llm_counter, max_llm_calls)
 
     return _build_entries(
         conn, ctx, ranked, pf_hits, top_k, dedupe_by_file, max_per_file, load_html

@@ -140,6 +140,47 @@ Label hygiene:
     except …") belong in cohort mode only.
 
 ═══════════════════════════════════════════════════════════════════════════════
+RETRIEVAL HINT  (help the retriever pick the right channel)
+═══════════════════════════════════════════════════════════════════════════════
+Each data_request may include a `retrieval_hint` object to guide which retrieval
+channel is most likely to find the data. Set `channel_preference` to one of:
+
+  "metric_exact"  — the question targets a specific named line item that reads
+                    like a ledger row label (e.g. "national defense",
+                    "public debt interest", "net interest"). The metric channel
+                    does a slug substring search over exact row labels — use this
+                    when you have a clean row_hint that should match verbatim.
+
+  "fts_keyword"   — topical or fuzzy question where the answer may span multiple
+                    rows, or where a keyword search over table titles and captions
+                    is more reliable than a row-label lookup (e.g. "savings bond
+                    sales in New York", "foreign currency holdings").
+
+  "prose"         — the answer lives in narrative text, footnotes, or contextual
+                    passages rather than table cells (e.g. "according to the
+                    footnote", "the report states that …", methodological notes).
+
+  "auto"          — you are uncertain; let retrieval decide (default).
+
+Use `must_match_phrases` for short phrases that MUST appear verbatim in the row
+label or section title (e.g. ["national defense"]). Keep to 1–2 phrases max.
+Use `avoid_phrases` for terms that would indicate a wrong table or row
+(e.g. ["state and local"] when you only want federal figures).
+
+═══════════════════════════════════════════════════════════════════════════════
+PERIOD FIELD  (top-level signal for calendar vs fiscal year)
+═══════════════════════════════════════════════════════════════════════════════
+Set top-level `period` to:
+  "CY"  — question clearly asks for calendar-year data ("calendar year 1940",
+          "CY 1940", or a bare year like "in 1940" with no fiscal qualifier)
+  "FY"  — question explicitly asks for fiscal-year data ("fiscal year 1940",
+          "FY 1940", "FY1940")
+  null  — ambiguous or period does not apply (e.g. a single date lookup)
+
+This field revives deterministic auto-fixes in a later pipeline stage; setting
+it accurately improves reliability on edge cases.
+
+═══════════════════════════════════════════════════════════════════════════════
 EXTERNAL DATA SOURCES
 ═══════════════════════════════════════════════════════════════════════════════
 Some questions need values that are NOT in the Treasury Bulletin corpus. Mark
@@ -351,7 +392,12 @@ OUTPUT — return ONLY this JSON schema, no prose
       "end_year": null,
       "end_month": null,
       "expected_count": 12,
-      "cohort": false
+      "cohort": false,
+      "retrieval_hint": {
+        "channel_preference": "metric_exact|fts_keyword|prose|auto",
+        "must_match_phrases": [],
+        "avoid_phrases": []
+      }
     }
   ],
   "computation_spec": {
@@ -365,7 +411,8 @@ OUTPUT — return ONLY this JSON schema, no prose
   },
   "resolution_notes": null,
   "question_kind": "value|page_number|date|text",
-  "vintage": "latest|as_reported"
+  "vintage": "latest|as_reported",
+  "period": "CY|FY|null"
 }"""
 
 
@@ -441,6 +488,45 @@ def _normalize_row_hint_alternatives(spec: dict) -> None:
             dr["row_hint_alternatives"] = [str(x).strip() for x in alts if str(x).strip()]
         else:
             dr["row_hint_alternatives"] = []
+
+
+_VALID_CHANNEL_PREFS = frozenset({"metric_exact", "fts_keyword", "prose", "auto"})
+
+
+def _normalize_retrieval_hint(spec: dict) -> None:
+    """Ensure each DR has a well-formed ``retrieval_hint`` and spec has ``period``.
+
+    - Missing ``retrieval_hint`` → default with ``channel_preference: "auto"``.
+    - Invalid ``channel_preference`` value → replaced with ``"auto"``.
+    - Missing/invalid ``period`` at spec level → ``null``.
+    """
+    for dr in spec.get("data_requests") or []:
+        if not isinstance(dr, dict):
+            continue
+        hint = dr.get("retrieval_hint")
+        if not isinstance(hint, dict):
+            dr["retrieval_hint"] = {
+                "channel_preference": "auto",
+                "must_match_phrases": [],
+                "avoid_phrases": [],
+            }
+            continue
+        # Validate / coerce channel_preference
+        cp = hint.get("channel_preference")
+        if cp not in _VALID_CHANNEL_PREFS:
+            hint["channel_preference"] = "auto"
+        # Ensure phrase lists are lists
+        for key in ("must_match_phrases", "avoid_phrases"):
+            val = hint.get(key)
+            if not isinstance(val, list):
+                hint[key] = [str(val).strip()] if val else []
+
+    # Top-level period field — ensure key is present and valid
+    period = spec.get("period")
+    if period not in ("CY", "FY", None):
+        spec["period"] = None
+    else:
+        spec.setdefault("period", None)
 
 
 def _coerce_year_value(y: object) -> int | None:
@@ -575,6 +661,7 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
 
         _normalize_decompose_years(spec, question)
         _normalize_row_hint_alternatives(spec)
+        _normalize_retrieval_hint(spec)
 
         # Reject duplicate-label DRs on binary computations: a `difference`
         # / `ratio` / `percent_change` between two identical things is
@@ -642,6 +729,11 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
                 "granularity": "unknown",
                 "expected_count": None,
                 "cohort": False,
+                "retrieval_hint": {
+                    "channel_preference": "auto",
+                    "must_match_phrases": [],
+                    "avoid_phrases": [],
+                },
             }
         ],
         "computation_spec": {"python_template": "result = values['v1']"},
@@ -650,4 +742,5 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
         "resolution_notes": "decompose fallback (LLM failed)",
         "cpi_needed": False,
         "vintage": "latest",
+        "period": None,
     }

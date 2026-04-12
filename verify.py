@@ -60,6 +60,11 @@ CHECKLIST = """Treasury Bulletin answer checklist:
 
 6. COLUMN POSITION. Wide tables with multi-level headers are easy to
    misread. Confirm the column by its header, not its position.
+
+7. TABLE RELEVANCE. Does the cited table (title + section) actually match
+   the subject of the question? If the table title or section clearly
+   describes a different topic than what the question asks, the wrong table
+   was retrieved — set suggested_phase to "retrieve".
 """
 
 
@@ -78,13 +83,14 @@ Output ONLY valid JSON:
 {{
   "ok": true|false,
   "issue": "<short description of the problem, or null>",
-  "suggested_phase": "extract"|"decompose"|null
+  "suggested_phase": "extract"|"decompose"|"retrieve"|null
 }}
 
 Choose "extract" when the spec was right but the numbers are wrong (misread
 value, wrong column, wrong row, units mistake). Choose "decompose" when the
 interpretation itself is wrong (fiscal vs calendar confusion, wrong
-computation, missing data requests)."""
+computation, missing data requests). Choose "retrieve" when the cited table
+title or section clearly describes the wrong topic — a retrieval error."""
 
 
 # ── Deterministic auto-fixes (run before LLM verify) ─────────────────────────
@@ -168,6 +174,39 @@ _FY_PATTERNS = re.compile(r"\bfiscal\s+year\b|\bfy\b|\bfy\s*\d{4}", re.IGNORECAS
 _CY_PATTERNS = re.compile(r"\bcalendar\s+year\b|\bcy\b|\bcy\s*\d{4}", re.IGNORECASE)
 
 
+def _infer_period_from_spec(spec: dict) -> str | None:
+    """Heuristically infer CY or FY from the decompose spec when period field is absent.
+
+    Checks data_requests[].years for explicit FY/CY prefixes, then checks
+    the granularity field for fiscal_year / calendar_year values.
+    Returns "FY", "CY", or None.
+    """
+    # Check granularity field
+    granularity = (spec.get("granularity") or "").lower()
+    if granularity in ("fiscal_year", "fy"):
+        return "FY"
+    if granularity in ("calendar_year", "cy"):
+        return "CY"
+
+    # Check data_requests[].years for FY/CY prefixes
+    for dr in spec.get("data_requests") or []:
+        for yr in dr.get("years") or []:
+            yr_str = str(yr).strip().upper()
+            if yr_str.startswith("FY"):
+                return "FY"
+            if yr_str.startswith("CY"):
+                return "CY"
+
+        # Also check the DR-level granularity
+        dr_gran = (dr.get("granularity") or "").lower()
+        if dr_gran in ("fiscal_year", "fy"):
+            return "FY"
+        if dr_gran in ("calendar_year", "cy"):
+            return "CY"
+
+    return None
+
+
 def auto_fix_fy_cy(
     spec: dict,
     extractions: dict,
@@ -183,6 +222,9 @@ def auto_fix_fy_cy(
     Returns dict with {flagged, issue, suggested_phase} if a mismatch is found.
     """
     period = spec.get("period")
+    if not period:
+        # Fallback: try to infer period from spec structure
+        period = _infer_period_from_spec(spec)
     if not period:
         return None
 
@@ -231,6 +273,7 @@ def verify_answer(
     answer: str,
     verbose: bool = False,
     source_unit: str | None = None,
+    per_dr_entries: dict | None = None,
 ) -> dict:
     """Return {ok, issue, suggested_phase}. On any internal failure, returns
     ok=True to avoid false-negative retries.
@@ -290,6 +333,31 @@ def verify_answer(
             f"  {vid} [{dr.get('label', '')}] granularity={dr.get('granularity', '?')} "
             f"years={dr.get('years')} src={src} count={len(vals)} values={preview}{more}"
         )
+
+    # Retrieval summary — compact metadata (no cell values) to help verify
+    # detect wrong-table retrieval errors.
+    if per_dr_entries:
+        parts.append("")
+        parts.append("=== Retrieval Summary ===")
+        for dr in spec.get("data_requests", []):
+            vid = dr["id"]
+            entries = per_dr_entries.get(vid) or []
+            if not entries:
+                continue
+            # Use the top (best-ranked) entry for each DR
+            top = entries[0]
+            src_file = top.get("file") or top.get("source_file") or "?"
+            table_title = top.get("title") or top.get("caption") or "?"
+            section = top.get("section") or "?"
+            row_labels = top.get("row_labels") or []
+            row_label = row_labels[0] if row_labels else "?"
+            parts.append(
+                f"  DR {vid}: source_file={src_file}"
+                f' | table_title="{table_title}"'
+                f' | section="{section}"'
+                f' | row_label="{row_label}"'
+            )
+
     user_msg = "\n".join(parts) + "\n\nReview the answer. Return the JSON verdict."
 
     try:

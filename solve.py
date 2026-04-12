@@ -40,6 +40,7 @@ def retrieve_for_spec(
     verbose: bool = False,
     top_k_per_dr: int = 20,
     max_per_file: int = 3,
+    llm_counter: dict | None = None,
 ) -> dict:
     """Per-DR retrieval against the table-level index.
 
@@ -53,6 +54,9 @@ def retrieve_for_spec(
     table when it wasn't the best-scoring table in its file (median intra-file
     rank of the gold table is 13). 3 gives extract a realistic shot at seeing
     the right table while keeping diversity across files.
+
+    `llm_counter` is threaded through to retrieve_v2 so the LLM rerank gate
+    can check and bump the budget counter.
     """
     per_dr: dict[str, list[dict]] = {}
     data_requests = spec.get("data_requests") or []
@@ -67,6 +71,8 @@ def retrieve_for_spec(
             verbose=verbose,
             max_per_file=max_per_file,
             vintage=vintage,
+            llm_counter=llm_counter,
+            max_llm_calls=MAX_LLM_CALLS,
         )
         per_dr[dr_id] = entries
     return per_dr
@@ -256,7 +262,7 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
             print(
                 f"  Bottom-up missed {len(empty_drs)} DR(s) — falling back to retrieve_v2: {empty_drs}"
             )
-        fallback = retrieve_for_spec(spec, question, verbose=verbose)
+        fallback = retrieve_for_spec(spec, question, verbose=verbose, llm_counter=llm_calls)
         for dr_id in empty_drs:
             per_dr[dr_id] = fallback.get(dr_id, [])
 
@@ -287,7 +293,7 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
         )
         if spec is None:
             return "DECOMPOSE_FAILED"
-        per_dr = retrieve_for_spec(spec, question, verbose=verbose)
+        per_dr = retrieve_for_spec(spec, question, verbose=verbose, llm_counter=llm_calls)
         if _total_entries(per_dr) == 0:
             return "RETRIEVE_EMPTY"
 
@@ -333,7 +339,7 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
                 ),
             )
             if spec2 is not None:
-                per_dr2 = retrieve_for_spec(spec2, question, verbose=verbose)
+                per_dr2 = retrieve_for_spec(spec2, question, verbose=verbose, llm_counter=llm_calls)
                 if _total_entries(per_dr2) > 0:
                     answer, extraction = _run_extract_and_compute(
                         spec2,
@@ -369,6 +375,7 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
         answer,
         verbose=verbose,
         source_unit=source_unit,
+        per_dr_entries=per_dr,
     )
 
     # Auto-fix: if unit correction was applied, use the corrected answer directly
@@ -414,7 +421,7 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
             print(f"  Verify flagged decompose: {issue}")
         spec2 = decompose(question, scout_hint=hint, feedback=issue)
         if spec2 is not None:
-            per_dr2 = retrieve_for_spec(spec2, question, verbose=verbose)
+            per_dr2 = retrieve_for_spec(spec2, question, verbose=verbose, llm_counter=llm_calls)
             if _total_entries(per_dr2) > 0:
                 answer2, extraction2 = _run_extract_and_compute(
                     spec2,
@@ -427,6 +434,15 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
                     ("EXTRACT_FAILED", "NO_VALUES", "COMPUTE_FAILED")
                 ):
                     answer = answer2
+
+    elif phase == "retrieve":
+        # v1: log-and-continue — do not spend a retry LLM call on re-retrieval.
+        # Measure signal quality first; retrieval retry can be added once we
+        # confirm the flag is reliable.
+        print(
+            f"  [verify_retrieve_flag] verify flagged wrong table: {issue}",
+            flush=True,
+        )
 
     if verbose:
         print(f"  Answer: {answer}")

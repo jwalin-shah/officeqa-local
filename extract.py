@@ -1566,6 +1566,46 @@ def _dr_context_budget(dr: dict, base: int) -> int:
     return min(200_000, int(base * scale))
 
 
+def _llm_pick_rows(
+    question: str,
+    dr: dict,
+    row_labels: list[str],
+    llm_counter: dict,
+) -> list[str] | None:
+    """Ask the LLM to pick the most relevant row labels (no cell values shown).
+
+    Returns a filtered list of row labels, or None to pass through unchanged.
+    Only called when the budget allows and there are >4 ambiguous row candidates.
+    """
+    import json as _json
+
+    system_msg = (
+        "You are a Treasury bulletin analyst. Given a question and a list of row labels "
+        "from a data table, output the JSON list of row labels that are most relevant to "
+        'answering the question. Output ONLY valid JSON: {"rows": ["label1", "label2"]}. '
+        "Include at most 5 labels. If unsure, include all of them."
+    )
+    user_msg = (
+        f"Question: {question}\n"
+        f"Data request: {dr.get('label', '')}\n"
+        f"Row hint: {dr.get('row_hint', '')}\n\n"
+        "Row labels:\n" + "\n".join(f"- {r}" for r in row_labels[:20])
+    )
+    try:
+        raw = llm(system_msg, user_msg, max_tokens=200)
+        llm_counter["count"] += 1
+        import re as _re
+
+        cleaned = _re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
+        parsed = _json.loads(cleaned)
+        picked = parsed.get("rows")
+        if isinstance(picked, list) and picked:
+            return [str(r) for r in picked]
+    except Exception:
+        pass
+    return None
+
+
 def extract_structured(
     spec: dict,
     per_dr_entries: dict,
@@ -1573,6 +1613,7 @@ def extract_structured(
     verbose: bool = False,
     feedback: str = "",
     _alt_render: bool = False,
+    llm_counter: dict | None = None,
 ) -> dict | None:
     """Extract structured values per the QuestionSpec's data_requests.
 
@@ -1665,6 +1706,52 @@ def extract_structured(
             # the front so the char budget is spread across all years.
             if len(dr_year_set) > 1:
                 entries = _ensure_year_coverage(entries, dr_year_set)
+        # ── LLM row-selection (narrow, cheap: labels only, no cell values) ──
+        # Gate: budget headroom left, many ambiguous row candidates, and the
+        # existing row_hint / row_hint_alternatives logic didn't uniquely
+        # resolve to a single row.
+        if llm_counter is not None and llm_counter["count"] < 4 and entries:
+            all_row_labels: list[str] = []
+            seen_labels: set[str] = set()
+            for _e in entries:
+                for _rl in _e.get("row_labels") or []:
+                    if _rl and _rl not in seen_labels:
+                        all_row_labels.append(_rl)
+                        seen_labels.add(_rl)
+            row_hint_val = (dr.get("row_hint") or "").strip().lower()
+            row_hint_alts = [
+                str(a).strip().lower()
+                for a in (dr.get("row_hint_alternatives") or [])
+                if str(a).strip()
+            ]
+            all_hints = ([row_hint_val] if row_hint_val else []) + row_hint_alts
+            # Determine whether hints already uniquely matched (i.e. exactly
+            # one row_label matches any hint).
+            if all_hints:
+                matching = [
+                    rl
+                    for rl in all_row_labels
+                    if any(h in rl.lower() or rl.lower() in h for h in all_hints)
+                ]
+                hint_resolved = len(matching) == 1
+            else:
+                hint_resolved = False
+
+            if len(all_row_labels) > 4 and not hint_resolved:
+                picked = _llm_pick_rows(question, dr, all_row_labels, llm_counter)
+                if picked:
+                    picked_lower = {p.lower() for p in picked}
+                    filtered_entries = [
+                        _e
+                        for _e in entries
+                        if any(
+                            rl.lower() in picked_lower or picked_lower & {rl.lower()}
+                            for rl in (_e.get("row_labels") or [])
+                        )
+                    ]
+                    if filtered_entries:  # guard: don't narrow to empty
+                        entries = filtered_entries
+
         per_request_budget = _dr_context_budget(dr, base_context_budget)
         _vt = 999 if _alt_render else 8
         _mr = 150 if _alt_render else 80
