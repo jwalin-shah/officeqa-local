@@ -1,0 +1,13 @@
+GOAL: Expand or harden deterministic fast-path (resolve_cells / bottom-up) behavior in find.py and its wiring.
+
+IN SCOPE: find.py, tests that cover resolve_cells / fast-path (coordinate if solve.py must change — avoid parallel edits to the same solve.py regions as decompose).
+
+OUT OF SCOPE: extract.py, retrieve_v2.py, build_ledger.py
+
+COMMANDS:
+  uv run ruff check .
+  uv run pytest tests/test_extraction.py -k fast_path -q --no-cov
+
+ACCEPTANCE: Ruff clean; fast-path tests pass.
+
+RETURN: Summary of contract changes and tests added or updated.

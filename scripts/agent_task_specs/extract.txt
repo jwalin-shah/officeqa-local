@@ -1,0 +1,13 @@
+GOAL: Improve extraction robustness (rendering, retries, ledger checks) in extract.py.
+
+IN SCOPE: extract.py, tests/test_extraction.py
+
+OUT OF SCOPE: retrieve_v2.py, compute.py, verify.py (unless a one-line contract fix is unavoidable)
+
+COMMANDS:
+  uv run ruff check .
+  uv run pytest tests/test_extraction.py -q --no-cov
+
+ACCEPTANCE: Ruff clean; extraction tests pass without new LLM calls in inner benchmark loops.
+
+RETURN: Summary of behavior change and tests run.

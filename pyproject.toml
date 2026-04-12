@@ -46,7 +46,6 @@ ignore = ["E501"]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
 reportMissingImports = true
-reportUnusedImports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,13 @@
+GOAL: Harden eval harnesses (retrieval / ledger / batch metrics) for reproducible gates.
+
+IN SCOPE: eval_*.py, batch_test.py, tests tied to eval fixtures (e.g. tests/test_baseline_metrics.py)
+
+OUT OF SCOPE: retrieve_v2.py, extract.py, solve.py (read-only unless fixing a shared constant)
+
+COMMANDS:
+  uv run ruff check .
+  uv run pytest tests/test_baseline_metrics.py -q --no-cov
+
+ACCEPTANCE: Ruff clean; baseline / fixture tests pass. No regeneration of decompose_eval.full.jsonl unless explicitly requested.
+
+RETURN: What metrics or scripts changed and how to run the new eval path.

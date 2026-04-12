@@ -163,9 +163,23 @@ def test_dispatch_percent_change():
     assert execute(spec, ex) == 25.0
 
 
+def test_dispatch_percent_change_raises_on_zero_base():
+    """percent_change uses v1 as base; zero base must not divide by zero."""
+    spec = _dispatch_spec("percent_change", n_drs=2)
+    with pytest.raises(ComputeError, match="percent_change: base is zero"):
+        execute(spec, {"v1": {"values": [0]}, "v2": {"values": [100]}})
+
+
 def test_dispatch_ratio():
     spec = _dispatch_spec("ratio", n_drs=2)
     assert execute(spec, {"v1": {"values": [10]}, "v2": {"values": [4]}}) == 2.5
+
+
+def test_dispatch_ratio_raises_on_zero_denominator():
+    """ratio is v1/v2; zero denominator must not divide by zero."""
+    spec = _dispatch_spec("ratio", n_drs=2)
+    with pytest.raises(ComputeError, match="ratio: denominator is zero"):
+        execute(spec, {"v1": {"values": [10]}, "v2": {"values": [0]}})
 
 
 def test_dispatch_average():

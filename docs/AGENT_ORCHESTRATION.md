@@ -49,7 +49,13 @@ trip over each other.
 ~/projects/officeqa-wt/ingest/          # agent 6
 ```
 
-Create them:
+Create them (equivalent to the loop below):
+
+```bash
+./scripts/setup_worktrees.sh
+```
+
+Or manually:
 
 ```bash
 mkdir -p ~/projects/officeqa-wt
@@ -59,6 +65,10 @@ for stream in retrieval decompose fastpath extract eval ingest; do
 done
 git worktree list
 ```
+
+Use `./scripts/setup_worktrees.sh --list` to print branch names and paths without creating directories. Override the parent directory with `OFFICEQA_WT_ROOT` and the base ref with `OFFICEQA_WT_BASE` (default `main`).
+
+Default in-repo layout (gitignored): `OFFICEQA_WT_ROOT=$REPO/.agent-worktrees` so worktrees stay next to the clone. After you commit new tooling on `main`, run `./scripts/refresh_worktrees_from_main.sh` so each `agent/*` branch picks it up.
 
 Tear down when a branch is merged:
 
@@ -75,6 +85,57 @@ git branch -d agent/retrieval
   respect that env var.
 
 Prefer the symlink until the code path is stable.
+
+## Siloed stages: what you can fake
+
+Upstream and downstream stages do **not** need to be “running” if you preserve **contracts**:
+
+| Stage | Others become… |
+|-------|------------------|
+| Decompose | Cached `QuestionSpec` / `decompose_eval.full.jsonl`; no live retrieve. |
+| Retrieval | Cached specs + `ledger.sqlite`; no LLM decompose or extract. |
+| Extraction | Hand-built or snapshot `per_dr` / table entries; mock `extract_structured` LLM. |
+| Compute | Values dict + template only (`compute.py` tests). |
+| Verify | Answer string + small context dict (`verify.py` tests). |
+
+Fakes must match **real field shapes** (file names, `html` vs prose entries, keys on retrieval dicts). Wrong fixtures give false-green silos.
+
+## Automated check rounds (local machine only)
+
+The repo cannot run Codex/Claude/Cursor on your behalf from GitHub Actions. On your laptop:
+
+```bash
+./scripts/setup_worktrees.sh
+./scripts/link_worktree_artifacts.sh
+DRY_RUN=1 ./scripts/agent_iterate.sh          # checks only, no agent
+MAX_ROUNDS=3 ./scripts/agent_iterate.sh       # checks; exits if anything fails
+
+# Optional: after a failure, re-run with a headless CLI (example — use your real flags):
+export OFFICEQA_AGENT='codex exec --sandbox workspace-write --full-auto'
+MAX_ROUNDS=2 ./scripts/agent_iterate.sh
+```
+
+Task text for each workstream lives in `scripts/agent_task_specs/<stream>.txt`. The helper `scripts/_invoke_agent.py` runs `shlex.split($OFFICEQA_AGENT)` and appends the prompt as a **single argv string** (fine for Codex-style CLIs).
+
+### Cursor Agent CLI (one shot per worktree)
+
+`cursor-agent` must be on `PATH` or at `~/.local/bin/cursor-agent` (already logged in via `cursor-agent whoami`).
+
+```bash
+# Read-only / planning pass (no `--force`)
+OFFICEQA_WT_ROOT="$PWD/.agent-worktrees" CURSOR_AGENT_MODE=plan \
+  ./scripts/cursor_agent_once.sh retrieval
+
+# Headless edit pass in that worktree (uses --force + --trust)
+OFFICEQA_WT_ROOT="$PWD/.agent-worktrees" \
+  ./scripts/cursor_agent_once.sh extract
+
+# Optional: pin model or relax sandbox (see cursor-agent --help)
+CURSOR_AGENT_MODEL=sonnet-4 OFFICEQA_CURSOR_SANDBOX=disabled \
+  ./scripts/cursor_agent_once.sh eval
+```
+
+From `agent_iterate.sh` after failed checks: `OFFICEQA_AGENT_CURSOR=1` (no `OFFICEQA_AGENT` needed).
 
 ## Headless invocation cheatsheet
 
@@ -156,9 +217,13 @@ Key flags:
 
 ### Cursor Agent (`cursor-agent`)
 
+Prefer **`./scripts/cursor_agent_once.sh <stream>`** so `--workspace` and the task file stay consistent (see earlier “Cursor Agent CLI” subsection).
+
+Manual equivalent:
+
 ```bash
 cd ~/projects/officeqa-wt/fastpath
-cursor-agent -p --force \
+cursor-agent --workspace "$(pwd)" -p --force --trust -- \
   "Formalize the deterministic fast-path: extract the fast-path block from \
    solve.py into fast_path.py with a resolve_all(data_requests) entry point. \
    Do not change behavior. Run: uv run pytest tests/ -x"
@@ -166,7 +231,9 @@ cursor-agent -p --force \
 
 Key flags:
 - `-p` / `--print` — non-interactive
-- `--force` — auto-approve edits
+- `--force` / `--yolo` — auto-approve tool use (pair with `--trust` for headless)
+- `--workspace <path>` — run inside a git worktree checkout
+- `--trust` — trust workspace without an interactive prompt
 - `--output-format {text|json|stream-json}` — pick based on tooling needs
 - `--model` — override model
 

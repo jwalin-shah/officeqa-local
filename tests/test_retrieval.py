@@ -409,7 +409,11 @@ def test_winning_hit_details_returns_rank_and_strategy():
 
 @skip_no_ledger
 def test_retrieve_empty_results():
-    """Retrieve returns empty list for completely bogus query."""
+    """VAL-RETR-008: bogus spec + question → both channels empty → retrieve() returns [].
+
+    Same contract as test_retrieve_zero_results_returns_empty_list; uses empty row/column
+    hints (still no FTS/metric hits for the nonce strings).
+    """
     entries = retrieve(
         {
             "data_requests": [
@@ -420,7 +424,9 @@ def test_retrieve_empty_results():
         top_k=5,
         load_html=False,
     )
-    assert isinstance(entries, list)
+    assert entries is not None, "retrieve() must not return None"
+    assert isinstance(entries, list), "retrieve() must return a list"
+    assert entries == [], "retrieve() must return empty list for completely bogus query"
 
 
 @skip_no_ledger

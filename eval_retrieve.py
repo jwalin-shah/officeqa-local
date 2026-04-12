@@ -2,8 +2,9 @@
 """Measure retrieve_v2.retrieve() recall@K against gold source files.
 
 Loads cached decompose specs from decompose_eval.full.jsonl so we never
-hit the LLM. Runs retrieve() with top_k=20 and checks whether any gold
-source file appears in the top-5 / top-10 / top-20 results.
+hit the LLM. Runs retrieve() with ``top_k=TOP_K`` (50) and records whether
+any gold source file appears within ranks 5, 10, 20, 30, and 50 of the
+retrieved list.
 """
 
 import concurrent.futures
@@ -43,6 +44,7 @@ def run_one(row: dict) -> dict:
     return {
         "uid": row["uid"],
         "gold": list(gold),
+        # Output field name is legacy; value is up to TOP_K (50) stems, not 20.
         "retrieved_top20": retrieved_stems,
         "first_hit_rank": first_hit,
         "hit_at_5": first_hit is not None and first_hit <= 5,
@@ -55,7 +57,7 @@ def run_one(row: dict) -> dict:
 
 
 def main():
-    rows = [json.loads(l) for l in CACHE.open()]
+    rows = [json.loads(l) for l in CACHE.open()]  # noqa: E741
     usable = [r for r in rows if r.get("spec") and r.get("gold_files")]
     print(f"Loaded {len(rows)} cached specs; {len(usable)} usable (non-null spec + gold)")
 
@@ -67,7 +69,7 @@ def main():
         for fut in concurrent.futures.as_completed(futures):
             res = fut.result()
             results.append(res)
-            done += 1
+            done += 1  # noqa: SIM113
             if res.get("error"):
                 mark = "ERR "
             elif res.get("skipped"):

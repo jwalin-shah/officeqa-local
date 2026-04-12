@@ -21,6 +21,15 @@ uv run python extract.py --test-oracle --n 20  # test extraction with gold files
 uv run python eval_decompose.py          # evaluate decompose phase output
 ```
 
+**Local agent worktrees:**
+```bash
+./scripts/setup_worktrees.sh              # create git worktrees for siloed agent stages
+./scripts/link_worktree_artifacts.sh      # link ledger.sqlite and cached decompose to worktrees
+./scripts/refresh_worktrees_from_main.sh  # refresh worktrees from latest main branch
+DRY_RUN=1 ./scripts/agent_iterate.sh     # iterate agent rounds (use DRY_RUN=1 first)
+OFFICEQA_WT_ROOT="$PWD/.agent-worktrees" ./scripts/cursor_agent_once.sh retrieval  # run Cursor Agent on a stage
+```
+
 ## Architecture
 Pipeline: scout → decompose → retrieve → [_try_deterministic_fast_path] → extract → compute → verify.
 
@@ -81,14 +90,25 @@ legacy fallback; prefer the JSON corpus for all new code.
 - `test_solve.py` — validation script.
 - `test_recall_with_decompose.py` — test retrieval recall with pre-cached decompose output.
 - `eval_decompose.py` — evaluation utilities for decompose phase output.
+- `eval_retrieve.py` — evaluation utilities for retrieval phase output.
 - `validate_decompose.py` — validation script for decompose phase output.
 - `eval_ledger.py` — evaluation utilities for ledger-based reference.
 - `batch_test.py` — batch evaluation runner with detailed metrics.
 - `build_index.py` — legacy corpus indexing (replaced by ledger approach).
 - `cpi.py` — CPI-U data 1930-2026.
+- `tests/conftest.py` — pytest fixtures for test setup.
+- `tests/test_build_ledger_row_year_propagate.py` — tests for ledger row year propagation logic.
+- `tests/test_extract_quality_retry.py` — tests for extraction quality retry mechanisms.
+- `scripts/setup_worktrees.sh` — create git worktrees in `.agent-worktrees/` for isolated agent stages.
+- `scripts/link_worktree_artifacts.sh` — symlink ledger.sqlite and decompose specs to worktrees.
+- `scripts/refresh_worktrees_from_main.sh` — refresh existing worktrees with latest code from main branch.
+- `scripts/agent_iterate.sh` — drive iterative agent rounds across worktrees (supports DRY_RUN=1).
+- `scripts/cursor_agent_once.sh` — invoke Cursor Agent on a single stage.
+- `scripts/_invoke_agent.py` — agent invocation helper.
 - `corpus_json/` — 697 parsed bulletin JSONs (primary corpus, gitignored).
 - `corpus/` — 697 `.txt` OCR fallback (legacy).
 - `officeqa_full.csv` — 246 benchmark questions with gold answers and source files.
+- `decompose_eval.full.jsonl` — cached decompose specs for all 246 questions; used offline for retrieval/extraction testing without live LLM calls.
 - `ledger.sqlite` — SQLite database built from corpus_json/; stores normalized cells, tables, prose, footnotes, and derived views for retrieval.
 
 ### Archive
@@ -98,7 +118,7 @@ Historical arena code has been removed from the repo (was `archive_from_arena/`,
 - LLM: OpenAI client library with DeepSeek via Dedalus (OpenAI-compatible endpoint). Model via
   `OFFICEQA_MODEL` env var (defaults to `deepseek/deepseek-chat`). API config in `.env`.
 - **Always test retrieval without the live LLM decompose call.** Use `retrieve_from_question()`
-  or a pre-cached decompose plan. Never put an LLM call in the inner loop of a benchmark
+  or `decompose_eval.full.jsonl` (pre-cached specs). Never put an LLM call in the inner loop of a benchmark
   sweep — it turns 5-second tests into 5-minute tests and mixes decompose noise into
   retrieval measurements.
 - **Real-time per-question logging during tests.** Every test loop should print one
@@ -109,6 +129,9 @@ Historical arena code has been removed from the repo (was `archive_from_arena/`,
 - Stdlib tools only: `difflib.SequenceMatcher`, `html.parser`, `clean_value()`, `to_num()`.
 - Safe Python evaluation in compute phase: restricted builtins, explicit imports.
 
+## CI
+GitHub Actions runs **Ruff** and **pytest** on pushes and PRs to `main`. Integration tests requiring `ledger.sqlite` are skipped in CI (marked with `pytest.mark.skipif(not os.path.exists(...))`). Run the full suite locally after building the ledger.
+
 ## Planning & documentation
 Deeper architecture and workstream docs are in:
 - `PLAN.md` — lossless ledger design and evolution strategy
@@ -116,6 +139,7 @@ Deeper architecture and workstream docs are in:
 - `docs/EXECUTION_ROADMAP.md` — implementation milestones and timeline
 - `docs/WORKSTREAMS.md` — workstream ownership and dependencies
 - `docs/INGESTION_AND_BENCHMARK_STRATEGY.md` — corpus integrity and benchmark approach
+- `docs/AGENT_ORCHESTRATION.md` — agent worktrees, siloed-stage fakes, merge rules, and Cursor Agent wiring
 
 ## Lint / type check
 ```bash

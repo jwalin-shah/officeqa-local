@@ -808,6 +808,27 @@ def build_row_entries(
     return rows
 
 
+def propagate_row_years_long_format(rows: list[dict]) -> None:
+    """Fill year_extracted on bare-month rows from the latest explicit anchor.
+
+    Walk order is the list order (same as ``row_index`` ascending from
+    :func:`build_row_entries`). Matches ``migrate_propagate_year.walk_table``:
+    track ``current_year`` from non-null ``year_extracted``, clear it on
+    truthy ``is_section_header`` rows, and set ``year_extracted`` when it is
+    currently null, ``month_extracted`` is set, and ``current_year`` is known.
+    """
+    current_year: int | None = None
+    for row in rows:
+        if row.get("is_section_header"):
+            current_year = None
+            continue
+        if row.get("year_extracted") is not None:
+            current_year = row["year_extracted"]
+            continue
+        if row.get("month_extracted") is not None and current_year is not None:
+            row["year_extracted"] = current_year
+
+
 def extract_year_month(text: str) -> tuple[int | None, int | None]:
     if not text:
         return None, None
@@ -1479,6 +1500,7 @@ def process_file(conn: sqlite3.Connection, path: Path) -> dict:
             auth["is_header"],
             auth.get("row_indents"),
         )
+        propagate_row_years_long_format(rows)
 
         col_id_by_index: dict[int, int] = {}
         for col in cols:

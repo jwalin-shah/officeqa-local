@@ -17,6 +17,9 @@ token.json
 # --- Logs ---
 *.log
 
+# --- Local git worktrees (scripts/setup_worktrees.sh) ---
+.agent-worktrees/
+
 # --- Local agent / tool state ---
 .claude/
 .tldr/
@@ -42,6 +45,8 @@ files.db-wal
 # --- Eval scratch outputs ---
 # JSONL eval outputs are regenerable scratch — commit gold fixtures explicitly.
 *.jsonl
+# Cached decompose specs for offline retrieval/eval (CI + local tests).
+!decompose_eval.full.jsonl
 
 # --- Scratch analysis notes (keep PLAN.md, README.md, docs/) ---
 funnel_analysis.md

@@ -1,0 +1,13 @@
+GOAL: Improve ledger retrieval quality or metrics in retrieve_v2.py without widening scope.
+
+IN SCOPE: retrieve_v2.py, retrieve.py, tests/test_retrieval.py
+
+OUT OF SCOPE: solve.py, extract.py, find.py, build_ledger.py, compute.py, verify.py. No new LLM calls in retrieval hot paths.
+
+COMMANDS:
+  uv run ruff check .
+  uv run pytest tests/test_retrieval.py -q --no-cov
+
+ACCEPTANCE: Ruff clean; pytest passes (skips without ledger are OK). If you change ranking, attach before/after numbers from uv run python retrieve_v2.py --test-ledger 20
+
+RETURN: Summary of edits, files touched, and any metric deltas.

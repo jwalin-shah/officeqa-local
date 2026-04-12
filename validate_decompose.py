@@ -88,7 +88,7 @@ def check_spec(row: dict) -> list[str]:
 
 
 def main():
-    path = Path(sys.argv[1] if len(sys.argv) > 1 else "decompose_eval.v2.jsonl")
+    path = Path(sys.argv[1] if len(sys.argv) > 1 else "decompose_eval.full.jsonl")
     rows = [json.loads(line) for line in path.open()]
     print(f"Checking {len(rows)} decomposed specs from {path}\n")
 

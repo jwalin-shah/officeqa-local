@@ -708,6 +708,7 @@ class TestPhaseRouting:
         with (
             patch("solve.scout", return_value=""),
             patch("solve.decompose") as mock_decompose,
+            patch("solve.retrieve_bottomup", return_value={"v1": []}),
             patch("solve.retrieve_for_spec") as mock_retrieve,
             patch("solve._try_deterministic_fast_path", return_value=({}, ["v1"])),
             patch("solve.extract_structured") as mock_extract,
@@ -718,7 +719,7 @@ class TestPhaseRouting:
             patch("solve.validate_extractions", return_value=[]),
         ):
             mock_decompose.return_value = spec
-            # First retrieve returns empty, second returns entries
+            # Bottom-up empty, then retrieve_v2 fallback empty, then post-redecompose retrieve succeeds
             mock_retrieve.side_effect = [
                 {"v1": []},  # empty
                 _make_per_dr_entries(),  # with entries

@@ -1220,11 +1220,13 @@ def resolve_cells(
         cleaf = c.get("col_leaf", "")
 
         row = conn.execute(
-            "SELECT id FROM table_rows WHERE table_id=? AND row_leaf=? LIMIT 1",
+            "SELECT id FROM table_rows WHERE table_id=? AND row_leaf=? "
+            "ORDER BY row_index ASC LIMIT 1",
             (tid, rleaf),
         ).fetchone()
         col = conn.execute(
-            "SELECT id FROM table_columns WHERE table_id=? AND col_leaf=? LIMIT 1",
+            "SELECT id FROM table_columns WHERE table_id=? AND col_leaf=? "
+            "ORDER BY col_index ASC LIMIT 1",
             (tid, cleaf),
         ).fetchone()
 

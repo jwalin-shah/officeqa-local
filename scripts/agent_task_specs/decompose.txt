@@ -1,0 +1,13 @@
+GOAL: Improve decompose reliability (spec validity, row_hint, years) with minimal surface area.
+
+IN SCOPE: Only the decompose path you were assigned (prefer validate_decompose.py, eval_decompose.py, or a clearly bounded slice of solve.py — coordinate so only one agent edits solve.py at a time).
+
+OUT OF SCOPE: retrieve_v2.py, extract.py, build_ledger.py, compute.py
+
+COMMANDS:
+  uv run ruff check .
+  uv run pytest tests/test_baseline_metrics.py -q --no-cov
+
+ACCEPTANCE: Ruff clean; baseline_metrics / decompose JSONL tests still pass. No unbounded LLM calls in eval loops.
+
+RETURN: What changed, which prompts or validators, and how to re-run eval_decompose.py locally.

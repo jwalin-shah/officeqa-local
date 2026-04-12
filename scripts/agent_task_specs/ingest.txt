@@ -1,0 +1,13 @@
+GOAL: Improve ingestion integrity in build_ledger.py (losslessness, flags, migrations) with a focused change set.
+
+IN SCOPE: build_ledger.py, migrate_*.py, tests/test_ledger.py
+
+OUT OF SCOPE: retrieve_v2.py, extract.py, solve.py
+
+COMMANDS:
+  uv run ruff check .
+  uv run pytest tests/test_ledger.py -q --no-cov
+
+ACCEPTANCE: Ruff clean; ledger tests pass when ledger.sqlite is present (symlink from main repo if missing).
+
+RETURN: Schema or ingest behavior change, rebuild instructions, and risk notes.
