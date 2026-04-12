@@ -211,6 +211,37 @@ _SYNONYM_GROUPS = [
 FTS_SYNONYM_THRESHOLD = 5
 METRIC_SYNONYM_THRESHOLD = 5
 
+# Progressive-stage bonuses: trace metadata already records which stage first
+# retrieved each table; nudging the reranker rewards higher-confidence paths
+# without dominating FTS+metric norms (which cap around 1.0).
+_FTS_STRATEGY_BONUS: dict[str, float] = {
+    "exact_year_filter": 0.06,
+    "exact_year_window": 0.04,
+    "synonym_year_window": 0.03,
+    "synonym_unrestricted": 0.02,
+    "year_shifted": 0.01,
+    "exact_unrestricted": 0.02,
+}
+_METRIC_STRATEGY_BONUS: dict[str, float] = {
+    "primary_exact": 0.08,
+    "synonym_exact": 0.05,
+    "partial_match": 0.02,
+}
+
+
+def _strategy_score_nudge(
+    fts_strategy: str | None,
+    metric_strategy: str | None,
+) -> float:
+    """Tiebreaker from first-hit retrieval stage (FTS ∪ metric progressive funnel)."""
+    fb = _FTS_STRATEGY_BONUS.get(fts_strategy or "", 0.0)
+    ms = metric_strategy or ""
+    if ms.startswith("alt:"):
+        ms = ms[4:]
+    mb = _METRIC_STRATEGY_BONUS.get(ms, 0.0)
+    # Use max so dual-channel hits are not double-counted into an oversized bump.
+    return max(fb, mb)
+
 
 def _tokenize(text: str) -> list[str]:
     if not text:
@@ -1401,6 +1432,10 @@ def retrieve(
         metric_weighted = 0.25 * metric_norm.get(tid, 0.0)
         weighted_channel_scores[tid] = (fts_weighted, metric_weighted)
         s = metric_weighted + fts_weighted
+        s += _strategy_score_nudge(
+            fts_trace.strategy_by_id.get(tid),
+            metric_trace.strategy_by_id.get(tid),
+        )
         if max_best_row_cells > 0 and matching_rows > 0:
             # Reward the table whose best matching row has the most
             # non-null cells — that's the one most likely to supply a

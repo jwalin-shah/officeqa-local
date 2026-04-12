@@ -18,6 +18,7 @@ from retrieve_v2 import (
     _period_aware_score_delta,
     _prose_footnote_channel,
     _row_hint_variants,
+    _strategy_score_nudge,
     _winning_hit_details,
     content_tokens,
     detect_year_mode,
@@ -155,6 +156,29 @@ def test_file_year_bonus_no_years():
 
 def test_file_year_bonus_none_year():
     assert _file_year_bonus(None, None, [1940], "calendar") == 0.0
+
+
+# ── _strategy_score_nudge (rerank tiebreaker) ───────────────────────────────
+
+
+def test_strategy_score_nudge_metric_primary_exact():
+    assert _strategy_score_nudge(None, "primary_exact") == 0.08
+
+
+def test_strategy_score_nudge_fts_exact_year_filter():
+    assert _strategy_score_nudge("exact_year_filter", None) == 0.06
+
+
+def test_strategy_score_nudge_alt_metric_strips_prefix():
+    assert _strategy_score_nudge(None, "alt:primary_exact") == 0.08
+
+
+def test_strategy_score_nudge_dual_channel_uses_max_not_sum():
+    assert _strategy_score_nudge("exact_year_filter", "primary_exact") == 0.08
+
+
+def test_strategy_score_nudge_unknown_strategies():
+    assert _strategy_score_nudge("unknown_stage", "nope") == 0.0
 
 
 # ── FTS channel (requires ledger.sqlite) ─────────────────────────────────────
