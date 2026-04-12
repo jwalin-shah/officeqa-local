@@ -147,6 +147,19 @@ def test_to_num_basic():
     assert to_num("-523") == -523.0
 
 
+def test_dr_context_budget_scales_with_expected_count():
+    from extract import _dr_context_budget
+
+    base = 8000
+    assert _dr_context_budget({}, base) == base
+    assert _dr_context_budget({"expected_count": 1}, base) == base
+    b12 = _dr_context_budget({"expected_count": 12}, base)
+    assert b12 > base
+    b84 = _dr_context_budget({"expected_count": 84}, base)
+    assert b84 >= b12
+    assert _dr_context_budget({"expected_count": 500}, base) <= 200_000
+
+
 def test_to_num_missing():
     assert to_num("nan") is None
     assert to_num("-") is None
@@ -1141,13 +1154,22 @@ def test_filter_cy_rows_vertical_format():
     assert "Jan. (month 1): 132" in result
 
 
-def test_filter_cy_rows_non_monthly_unchanged():
-    """Non-monthly granularity returns text unchanged."""
+def test_filter_cy_rows_annual_strips_monthly_pipe_rows():
+    """Annual granularity removes month-as-row pipe lines; keeps bare year and FY rows."""
     text = _make_monthly_rows_pipe_context()
-    result = filter_cy_rows(text, "annual")
-    # Nothing should be filtered for annual granularity
+    result = filter_cy_rows(text, "annual", years=[1940])
+    assert "| 1940-January |" not in result
+    assert "| February |" not in result
     assert "| 1940 |" in result
     assert "Fiscal year 1940" in result
+    assert "| Fiscal year or month |" in result
+
+
+def test_filter_cy_rows_quarterly_unchanged():
+    """Granularities other than monthly_all / annual are passed through unchanged."""
+    text = _make_monthly_rows_pipe_context()
+    result = filter_cy_rows(text, "quarterly", years=[1940])
+    assert text == result
 
 
 def test_filter_cy_rows_empty_text():
@@ -2161,6 +2183,117 @@ class TestLedgerCrossCheck:
         drs = [{"id": "v1"}]
         _verify_against_ledger(extractions, drs, {"v1": []})
         assert extractions["v1"]["values"] == [1580]
+
+    def test_warns_when_coordinates_missing(self, caplog):
+        """Corpus extraction with values but no row/col labels logs a warning."""
+        import logging
+
+        entry = self._make_entry(
+            ["Category", "1940"],
+            [["Defense", "1580"]],
+        )
+        extractions = {
+            "v1": {
+                "values": [1590.0],
+                "labels": ["1940"],
+            }
+        }
+        drs = [{"id": "v1", "source": "corpus"}]
+        with caplog.at_level(logging.WARNING):
+            _verify_against_ledger(extractions, drs, {"v1": [entry]})
+        assert "Ledger cross-check skipped" in caplog.text
+        assert "v1" in caplog.text
+
+    def test_warns_when_coordinate_len_mismatch(self, caplog):
+        import logging
+
+        entry = self._make_entry(
+            ["Category", "1940"],
+            [["Defense", "1580"]],
+        )
+        extractions = {
+            "v1": {
+                "values": [1580.0, 2.0],
+                "row_labels": ["Defense"],
+                "col_labels": ["1940"],
+            }
+        }
+        drs = [{"id": "v1", "source": "corpus"}]
+        with caplog.at_level(logging.WARNING):
+            _verify_against_ledger(extractions, drs, {"v1": [entry]})
+        assert "length" in caplog.text
+        assert extractions["v1"]["values"] == [1580.0, 2.0]
+
+    def test_skips_correction_when_tables_disagree(self):
+        """Same (row, col) in two retrieved tables with different values — do not
+        pick an arbitrary winner; leave the LLM value unchanged."""
+        entry_a = self._make_entry(
+            ["Category", "1940"],
+            [["Defense", "1580"]],
+        )
+        entry_a["file"] = "table_a.json"
+        entry_b = self._make_entry(
+            ["Category", "1940"],
+            [["Defense", "9999"]],
+        )
+        entry_b["file"] = "table_b.json"
+        extractions = {
+            "v1": {
+                "values": [1590],
+                "labels": ["1940"],
+                "row_labels": ["Defense"],
+                "col_labels": ["1940"],
+            }
+        }
+        drs = [{"id": "v1"}]
+        _verify_against_ledger(extractions, drs, {"v1": [entry_a, entry_b]})
+        assert extractions["v1"]["values"] == [1590]
+        assert "verification" not in extractions["v1"]
+
+    def test_source_file_disambiguates_conflict(self):
+        """When two tables disagree, source_file selects the matching HTML."""
+        entry_a = self._make_entry(
+            ["Category", "1940"],
+            [["Defense", "1580"]],
+        )
+        entry_a["file"] = "treasury_bulletin_1941_01.json"
+        entry_b = self._make_entry(
+            ["Category", "1940"],
+            [["Defense", "9999"]],
+        )
+        entry_b["file"] = "other.json"
+        extractions = {
+            "v1": {
+                "values": [1590],
+                "labels": ["1940"],
+                "row_labels": ["Defense"],
+                "col_labels": ["1940"],
+                "source_file": "treasury_bulletin_1941_01.json",
+            }
+        }
+        drs = [{"id": "v1"}]
+        _verify_against_ledger(extractions, drs, {"v1": [entry_a, entry_b]})
+        assert extractions["v1"]["values"] == [1580]
+        assert "corrected" in extractions["v1"].get("verification", "")
+
+    def test_near_zero_absolute_tolerance(self):
+        """Very small numeric drift still counts as a match (no spurious correction)."""
+        entry = self._make_entry(
+            ["Category", "1940"],
+            [["Defense", "0.0000001"]],
+        )
+        extractions = {
+            "v1": {
+                "values": [0.0],
+                "labels": ["1940"],
+                "row_labels": ["Defense"],
+                "col_labels": ["1940"],
+            }
+        }
+        drs = [{"id": "v1"}]
+        _verify_against_ledger(extractions, drs, {"v1": [entry]})
+        assert extractions["v1"]["values"] == [0.0]
+        assert "verification" not in extractions["v1"]
 
 
 # ── Row label disambiguation ────────────────────────────────────────────────
