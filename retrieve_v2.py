@@ -194,6 +194,10 @@ _METRIC_SLUG_PUNCT_RE = re.compile(r"[^\w\s\-]")
 _METRIC_SLUG_WS_RE = re.compile(r"\s+")
 
 _SYNONYM_GROUPS = [
+    ("assets", "liabilities", "condition", "balance sheet"),
+    ("debt", "public debt", "obligations", "securities", "bonds", "notes", "bills", "certificates"),
+    ("estimates", "projections", "budget", "forecasts"),
+    ("currency", "money", "circulation", "coins", "notes", "cash"),
     ("expenditures", "outlays", "spending", "disbursements"),
     ("receipts", "revenue", "income", "collections"),
     ("defense", "national defense", "military"),
@@ -208,8 +212,8 @@ _SYNONYM_GROUPS = [
     ("tax", "taxation", "taxes", "revenue"),
 ]
 
-FTS_SYNONYM_THRESHOLD = 5
-METRIC_SYNONYM_THRESHOLD = 5
+FTS_SYNONYM_THRESHOLD = 100
+METRIC_SYNONYM_THRESHOLD = 100
 
 # Progressive-stage bonuses: trace metadata already records which stage first
 # retrieved each table; nudging the reranker rewards higher-confidence paths
@@ -845,6 +849,12 @@ def _fts_channel_trace(
                     "exact_year_window",
                     file_year_range=window,
                 )[1],
+            )
+        )
+        stages.append(
+            (
+                "exact_unrestricted",
+                lambda query=exact_query: _run(query, "exact_unrestricted")[1],
             )
         )
         if synonym_query and synonym_query != exact_query:

@@ -272,6 +272,8 @@ def test_fts_channel_trace_runs_full_progressive_cascade():
                 strategy = "exact_year_filter"
             elif file_year_between and not year_filter and params[1:3] == [1940, 1944]:
                 strategy = "exact_year_window"
+            elif not file_year_between and not ("outlays" in query or "military" in query):
+                strategy = "exact_unrestricted"
             else:
                 strategy = "unknown"
             self.calls.append(strategy)
@@ -286,6 +288,7 @@ def test_fts_channel_trace_runs_full_progressive_cascade():
     assert [name for name, _ in trace.attempts] == [
         "exact_year_filter",
         "exact_year_window",
+        "exact_unrestricted",
         "synonym_year_window",
         "synonym_unrestricted",
         "year_shifted",
