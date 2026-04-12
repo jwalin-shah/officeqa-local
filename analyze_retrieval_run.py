@@ -38,9 +38,13 @@ def main() -> int:
     rows = _load_rows(args.details)
     usable = [r for r in rows if not r.get("error") and not r.get("skipped")]
     counts: Counter[str] = Counter()
+    table_counts: Counter[str] = Counter()
     rank_sum = 0.0
     rank_count = 0
     examples: dict[str, list[str]] = {
+        k: [] for k in ("rank_11_20", "rank_21_30", "rank_31_50", "miss")
+    }
+    table_examples: dict[str, list[str]] = {
         k: [] for k in ("rank_11_20", "rank_21_30", "rank_31_50", "miss")
     }
 
@@ -48,11 +52,16 @@ def main() -> int:
         rank = row.get("first_hit_rank")
         bucket = _bucket(rank)
         counts[bucket] += 1
+        table_rank = row.get("first_table_hit_rank")
+        table_bucket = _bucket(table_rank)
+        table_counts[table_bucket] += 1
         if rank is not None:
             rank_sum += 1.0 / rank
             rank_count += 1
         if bucket in examples and len(examples[bucket]) < 10:
             examples[bucket].append(row["uid"])
+        if table_bucket in table_examples and len(table_examples[table_bucket]) < 10:
+            table_examples[table_bucket].append(row["uid"])
 
     n = len(usable)
     summary = {
@@ -88,15 +97,64 @@ def main() -> int:
         )
         if n
         else 0.0,
+        "table_recall_at_5": round(table_counts["top_5"] / n * 100, 1) if n else 0.0,
+        "table_recall_at_10": round(
+            (table_counts["top_5"] + table_counts["rank_6_10"]) / n * 100, 1
+        )
+        if n
+        else 0.0,
+        "table_recall_at_20": round(
+            (table_counts["top_5"] + table_counts["rank_6_10"] + table_counts["rank_11_20"])
+            / n
+            * 100,
+            1,
+        )
+        if n
+        else 0.0,
+        "table_recall_at_30": round(
+            (
+                table_counts["top_5"]
+                + table_counts["rank_6_10"]
+                + table_counts["rank_11_20"]
+                + table_counts["rank_21_30"]
+            )
+            / n
+            * 100,
+            1,
+        )
+        if n
+        else 0.0,
+        "table_recall_at_50": round(
+            (
+                table_counts["top_5"]
+                + table_counts["rank_6_10"]
+                + table_counts["rank_11_20"]
+                + table_counts["rank_21_30"]
+                + table_counts["rank_31_50"]
+            )
+            / n
+            * 100,
+            1,
+        )
+        if n
+        else 0.0,
         "mrr": round(rank_sum / n, 4) if n else 0.0,
         "rank_buckets": dict(counts),
+        "table_rank_buckets": dict(table_counts),
         "headroom": {
             "move_11_20_into_top10": counts["rank_11_20"],
             "move_21_30_into_top10": counts["rank_21_30"],
             "move_31_50_into_top10": counts["rank_31_50"],
             "misses": counts["miss"],
         },
+        "table_headroom": {
+            "move_11_20_into_top10": table_counts["rank_11_20"],
+            "move_21_30_into_top10": table_counts["rank_21_30"],
+            "move_31_50_into_top10": table_counts["rank_31_50"],
+            "misses": table_counts["miss"],
+        },
         "examples": examples,
+        "table_examples": table_examples,
     }
 
     print(json.dumps(summary, indent=2))

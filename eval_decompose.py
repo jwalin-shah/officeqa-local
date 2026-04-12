@@ -17,7 +17,7 @@ import json
 import sys
 import time
 
-from solve import decompose
+from decompose import decompose
 from validate_decompose import check_spec
 
 sys.stdout.reconfigure(line_buffering=True)

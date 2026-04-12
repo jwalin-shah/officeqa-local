@@ -7,6 +7,10 @@ import pytest
 
 from retrieve_v2 import (
     LEDGER_PATH,
+    CandidateCompatibility,
+    _apply_structure_compatibility_filter,
+    _apply_year_compatibility_filter,
+    _candidate_compatibility,
     _detect_wants_monthly,
     _expand_synonyms,
     _extract_hints,
@@ -133,6 +137,8 @@ def test_extract_hints_from_plan():
     assert hints[0]["col_hint"] == "1940"
     assert hints[0]["row_hint"] == "National defense"
     assert hints[0]["years"] == [1940]
+    assert hints[0]["granularity"] == ""
+    assert hints[0]["source"] == ""
 
 
 # ── _file_year_bonus ─────────────────────────────────────────────────────────
@@ -179,6 +185,125 @@ def test_strategy_score_nudge_dual_channel_uses_max_not_sum():
 
 def test_strategy_score_nudge_unknown_strategies():
     assert _strategy_score_nudge("unknown_stage", "nope") == 0.0
+
+
+def test_apply_year_compatibility_filter_uses_year_matches_when_pool_is_large():
+    filtered = _apply_year_compatibility_filter(
+        set(range(1, 16)),
+        {
+            **{i: CandidateCompatibility(has_target_year=False) for i in range(1, 16)},
+            **{i: CandidateCompatibility(has_target_year=True) for i in range(1, 11)},
+        },
+        [1940],
+        top_k=5,
+    )
+    assert filtered == set(range(1, 11))
+
+
+def test_apply_year_compatibility_filter_keeps_pool_when_matches_are_too_sparse():
+    original = set(range(1, 9))
+    filtered = _apply_year_compatibility_filter(
+        original,
+        {
+            **{i: CandidateCompatibility(has_target_year=False) for i in original},
+            1: CandidateCompatibility(has_target_year=True),
+            2: CandidateCompatibility(has_target_year=True),
+        },
+        [1940],
+        top_k=5,
+    )
+    assert filtered == original
+
+
+def test_candidate_compatibility_combines_year_month_and_row_probe():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeConn:
+        def execute(self, sql, params):
+            if "SELECT DISTINCT table_id" in sql and "year IN" in sql:
+                return FakeResult([(101,)])
+            if "SELECT DISTINCT table_id" in sql and "month IS NOT NULL" in sql:
+                return FakeResult([(101,), (202,)])
+            if "FROM table_rows r" in sql and "r.metric_slug LIKE ?" in sql:
+                return FakeResult([(101, 1, 12)])
+            raise AssertionError(f"unexpected query: {sql}")
+
+    compat = _candidate_compatibility(
+        cast(Any, FakeConn()),
+        [101, 202],
+        ["National defense"],
+        [],
+        [1940],
+        set(),
+    )
+    assert compat[101].has_target_year
+    assert compat[101].has_month_data
+    assert compat[101].has_row_hint_match
+    assert compat[101].best_row_non_null_cells == 12
+    assert compat[202].has_month_data
+    assert not compat[202].has_target_year
+    assert not compat[202].has_row_hint_match
+
+
+def test_candidate_compatibility_detects_column_matches():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeConn:
+        def execute(self, sql, params):
+            if "SELECT DISTINCT table_id" in sql and "year IN" in sql:
+                return FakeResult([])
+            if "SELECT DISTINCT table_id" in sql and "month IS NOT NULL" in sql:
+                return FakeResult([(10,)])
+            if "FROM table_rows r" in sql and "r.metric_slug LIKE ?" in sql:
+                return FakeResult([])
+            if "FROM table_columns" in sql:
+                return FakeResult(
+                    [
+                        (10, "Jan. 31, 1975", "Jan. 31, 1975"),
+                        (11, "Feb. 28, 1975", "Feb. 28, 1975"),
+                    ]
+                )
+            raise AssertionError(f"unexpected query: {sql}")
+
+    compat = _candidate_compatibility(
+        cast(Any, FakeConn()),
+        [10, 11],
+        [],
+        ["Jan. 31, 1975"],
+        [1975],
+        {"specific_month"},
+    )
+    assert compat[10].has_col_hint_match
+    assert compat[10].col_match_count >= 2
+    assert compat[10].has_required_granularity
+    assert not compat[11].has_col_hint_match
+
+
+def test_apply_structure_compatibility_filter_prefers_granularity_then_columns():
+    original = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+    compat = {i: CandidateCompatibility(has_required_granularity=True) for i in original}
+    for i in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+        compat[i].has_col_hint_match = True
+    compat[11].has_required_granularity = False
+    compat[12].has_required_granularity = False
+    filtered = _apply_structure_compatibility_filter(
+        original,
+        compat,
+        {"specific_month"},
+        ["Jan. 31, 1975"],
+        top_k=10,
+    )
+    assert filtered == set(range(1, 11))
 
 
 # ── FTS channel (requires ledger.sqlite) ─────────────────────────────────────
@@ -659,6 +784,8 @@ def test_extract_hints_returns_row_hint_alternatives():
     assert hint["metric"] == "national defense spending"
     assert hint["col_hint"] == "Total"
     assert hint["years"] == [1940]
+    assert hint["granularity"] == ""
+    assert hint["source"] == ""
 
 
 def test_extract_hints_multi_request():
@@ -702,6 +829,24 @@ def test_extract_hints_empty_alternatives():
     }
     hints = _extract_hints(plan, "question")
     assert hints[0]["row_hint_alternatives"] == []
+
+
+def test_extract_hints_preserves_source_and_granularity():
+    plan = {
+        "data_requests": [
+            {
+                "label": "defense spending",
+                "source": "corpus",
+                "row_hint": "National defense",
+                "column_hint": "Jan. 1940",
+                "years": [1940],
+                "granularity": "specific_month",
+            }
+        ],
+    }
+    hints = _extract_hints(plan, "question")
+    assert hints[0]["source"] == "corpus"
+    assert hints[0]["granularity"] == "specific_month"
 
 
 def test_extract_hints_back_compat():

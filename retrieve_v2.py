@@ -18,6 +18,8 @@ The old corpus_index.pkl + BM25 + sentence-transformer retriever was retired
 once the ledger-backed funnel pulled ahead on head-to-head recall.
 """
 
+from __future__ import annotations
+
 import json
 import re
 import sqlite3
@@ -521,6 +523,185 @@ def _bulk_cell_probe(
     return res
 
 
+def _candidate_compatibility(
+    conn: sqlite3.Connection,
+    table_ids: set[int] | list[int],
+    row_hints: list[str],
+    col_hints: list[str],
+    target_years: list[int],
+    requested_granularities: set[str],
+) -> dict[int, CandidateCompatibility]:
+    if not table_ids:
+        return {}
+
+    tid_list = list(table_ids)
+    compat = {tid: CandidateCompatibility() for tid in tid_list}
+    tid_placeholders = ",".join("?" * len(tid_list))
+
+    if target_years:
+        year_placeholders = ",".join("?" * len(target_years))
+        year_rows = conn.execute(
+            f"""
+            SELECT table_id, year
+              FROM (
+                    SELECT table_id, year_extracted AS year
+                      FROM table_columns
+                     WHERE table_id IN ({tid_placeholders})
+                    UNION ALL
+                    SELECT table_id, year_extracted AS year
+                      FROM table_rows
+                     WHERE table_id IN ({tid_placeholders})
+                   )
+             WHERE year IN ({year_placeholders})
+            """,
+            (*tid_list, *tid_list, *target_years),
+        ).fetchall()
+
+        table_years: dict[int, set[int]] = {}
+        for row in year_rows:
+            tid = int(row[0])
+            year = int(row[1])
+            if tid not in table_years:
+                table_years[tid] = set()
+            table_years[tid].add(year)
+
+        for tid, years in table_years.items():
+            compat[tid].has_target_year = True
+            compat[tid].matching_target_years_count = len(years)
+
+    month_rows = conn.execute(
+        f"""
+        SELECT DISTINCT table_id
+          FROM (
+                SELECT table_id, month_extracted AS month
+                  FROM table_columns
+                 WHERE table_id IN ({tid_placeholders})
+                UNION ALL
+                SELECT table_id, month_extracted AS month
+                  FROM table_rows
+                 WHERE table_id IN ({tid_placeholders})
+               )
+         WHERE month IS NOT NULL
+        """,
+        (*tid_list, *tid_list),
+    ).fetchall()
+    for row in month_rows:
+        compat[int(row[0])].has_month_data = True
+
+    if requested_granularities:
+        monthly_like = {"monthly_all", "specific_month"}
+        quarterly_like = {"quarterly"}
+        annual_like = {"annual"}
+        for state in compat.values():
+            if requested_granularities & monthly_like or requested_granularities & quarterly_like:
+                state.has_required_granularity = state.has_month_data
+            elif requested_granularities & annual_like:
+                state.has_required_granularity = True
+            else:
+                state.has_required_granularity = True
+    else:
+        for state in compat.values():
+            state.has_required_granularity = True
+
+    probe_stats = _bulk_cell_probe(conn, tid_list, row_hints)
+    for tid, (row_match_count, best_row_non_null_cells) in probe_stats.items():
+        state = compat.setdefault(tid, CandidateCompatibility())
+        state.row_match_count = row_match_count
+        state.best_row_non_null_cells = best_row_non_null_cells
+        state.has_row_hint_match = row_match_count > 0 and best_row_non_null_cells > 0
+
+    if col_hints:
+        normalized_hints = []
+        for hint in col_hints:
+            tokens = set(re.findall(r"[a-z0-9]+", hint.lower()))
+            if tokens:
+                normalized_hints.append(tokens)
+        if normalized_hints:
+            col_rows = conn.execute(
+                f"""
+                SELECT table_id, col_path, col_leaf
+                  FROM table_columns
+                 WHERE table_id IN ({tid_placeholders})
+                """,
+                tid_list,
+            ).fetchall()
+            table_col_matches: dict[int, int] = {}
+            for row in col_rows:
+                table_id = int(row[0])
+                col_text = " ".join((str(row[1] or ""), str(row[2] or ""))).lower()
+                col_tokens = set(re.findall(r"[a-z0-9]+", col_text))
+                if not col_tokens:
+                    continue
+                best_match = 0
+                for hint_tokens in normalized_hints:
+                    if hint_tokens.issubset(col_tokens):
+                        best_match = max(best_match, len(hint_tokens))
+                        continue
+                    overlap = len(hint_tokens.intersection(col_tokens))
+                    if len(hint_tokens) >= 2 and overlap >= max(1, len(hint_tokens) - 1):
+                        best_match = max(best_match, overlap)
+                if best_match > 0:
+                    table_col_matches[table_id] = max(
+                        table_col_matches.get(table_id, 0), best_match
+                    )
+            for tid, count in table_col_matches.items():
+                state = compat.setdefault(tid, CandidateCompatibility())
+                state.col_match_count = count
+                state.has_col_hint_match = True
+
+    return compat
+
+
+def _apply_year_compatibility_filter(
+    candidate_ids: set[int],
+    compat: dict[int, CandidateCompatibility],
+    target_years: list[int],
+    top_k: int,
+) -> set[int]:
+    if not candidate_ids or not target_years:
+        return candidate_ids
+
+    year_compatible = {
+        tid for tid in candidate_ids if compat.get(tid, CandidateCompatibility()).has_target_year
+    }
+    min_pool = max(min(top_k, 50), 10)
+    if len(year_compatible) >= min_pool:
+        return year_compatible
+    return candidate_ids
+
+
+def _apply_structure_compatibility_filter(
+    candidate_ids: set[int],
+    compat: dict[int, CandidateCompatibility],
+    requested_granularities: set[str],
+    col_hints: list[str],
+    top_k: int,
+) -> set[int]:
+    if not candidate_ids:
+        return candidate_ids
+
+    min_pool = max(min(top_k, 50), 10)
+    filtered = set(candidate_ids)
+
+    if requested_granularities & {"monthly_all", "specific_month", "quarterly"}:
+        granularity_compatible = {
+            tid
+            for tid in filtered
+            if compat.get(tid, CandidateCompatibility()).has_required_granularity
+        }
+        if len(granularity_compatible) >= min_pool:
+            filtered = granularity_compatible
+
+    if col_hints:
+        col_compatible = {
+            tid for tid in filtered if compat.get(tid, CandidateCompatibility()).has_col_hint_match
+        }
+        if len(col_compatible) >= min_pool:
+            filtered = col_compatible
+
+    return filtered
+
+
 def _merge_ranked_rows(*groups: list[sqlite3.Row], top_n: int) -> list[sqlite3.Row]:
     merged: list[sqlite3.Row] = []
     seen_ids: set[int] = set()
@@ -541,6 +722,19 @@ class ChannelTrace:
     rows: list[sqlite3.Row]
     strategy_by_id: dict[int, str]
     attempts: list[tuple[str, int]]
+
+
+@dataclass
+class CandidateCompatibility:
+    has_target_year: bool = False
+    matching_target_years_count: int = 0
+    has_month_data: bool = False
+    has_required_granularity: bool = False
+    has_row_hint_match: bool = False
+    has_col_hint_match: bool = False
+    row_match_count: int = 0
+    col_match_count: int = 0
+    best_row_non_null_cells: int = 0
 
 
 def _append_unique_rows(
@@ -775,7 +969,7 @@ def _load_element_html(file: str, element_seq: int) -> str:
 def _fts_escape(tokens: list[str], mode: str = "or") -> str:
     """Build a permissive FTS5 MATCH query. `mode` is 'or' or 'and'."""
     safe = [f'"{t}"' for t in tokens if t and "'" not in t and '"' not in t]
-    safe = safe[:12]
+    safe = safe[:24]
     if not safe:
         return ""
     joiner = " AND " if mode == "and" else " OR "
@@ -789,7 +983,7 @@ def _extract_hints(plan: dict | None, question: str) -> list[dict]:
     """Extract retrieval hints from ALL data_requests in a plan.
 
     Returns a list of dicts (one per data_request), each with keys:
-      metric, col_hint, row_hint, row_hint_alternatives, years
+      metric, col_hint, row_hint, row_hint_alternatives, years, granularity, source
     If plan is None or has no data_requests, returns [].
     """
     reqs = (plan or {}).get("data_requests") or []
@@ -817,6 +1011,8 @@ def _extract_hints(plan: dict | None, question: str) -> list[dict]:
                 "row_hint": row_hint,
                 "row_hint_alternatives": list(row_hint_alts),
                 "years": tys,
+                "granularity": (req.get("granularity") or "").strip(),
+                "source": (req.get("source") or "").strip(),
             }
         )
     return hints
@@ -848,13 +1044,33 @@ def _fts_channel_trace(
     q_tokens: list[str],
     target_years: list[int],
     wants_monthly: bool,
-    top_n: int = 400,
+    top_n: int = 1000,
     source_text: str = "",
     year_mode: str = "unknown",
+    limit_ids: set[int] | None = None,
 ) -> ChannelTrace:
     """Run the FTS5 channel with progressive broadening and trace metadata."""
     if not q_tokens:
         return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
+
+    # Fast path: candidate set already narrowed by family+year funnel — just fetch
+    # them directly by ID. No FTS needed; reranker handles scoring downstream.
+    if limit_ids is not None:
+        if not limit_ids:
+            return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
+        id_ph = ",".join("?" * len(limit_ids))
+        rows = conn.execute(
+            f"SELECT id, file, element_seq, element_id, page_id, file_year, file_month,"
+            f" title, section, caption, unit, period, n_rows, n_cols, signature,"
+            f" 0.0 AS score"
+            f" FROM tables WHERE id IN ({id_ph}) AND table_kind = 'data'",
+            list(limit_ids),
+        ).fetchall()
+        return ChannelTrace(
+            rows=rows,
+            strategy_by_id={r["id"]: "direct_candidate" for r in rows},
+            attempts=[("direct_candidate", len(rows))],
+        )
 
     def _build_year_filter_clause() -> tuple[str, tuple]:
         if not target_years:
@@ -888,17 +1104,47 @@ def _fts_channel_trace(
             file_year_params = file_year_range
 
         wf_clause = year_filter_clause if with_year_filter else ""
+
+        # When limit_ids is set: run FTS unrestricted (fast — no JOINs on FTS5),
+        # fetch a large pool, then Python-filter to limit_ids. Adding any JOIN or
+        # subquery to FTS5 forces a full-index scan and makes it 100x slower.
+        if limit_ids is not None:
+            if not limit_ids:
+                return strategy, []
+            # Run FTS unrestricted with a large pool, Python-filter to candidates.
+            # Any JOIN/subquery on FTS5 forces full-index scan; plain FTS + Python filter is faster.
+            params_fts: list[object] = [fts_query]
+            pool_size = max(5000, len(limit_ids) * 10)
+            sql = (
+                " SELECT"  # nosec B608
+                " t.id, t.file, t.element_seq, t.element_id, t.page_id,"
+                " t.file_year, t.file_month,"
+                " t.title, t.section, t.caption, t.unit, t.period,"
+                " t.n_rows, t.n_cols, t.signature,"
+                " bm25(tables_fts, 2.0, 1.5, 1.5, 2.0, 2.5) AS score"
+                " FROM tables_fts"
+                " JOIN tables t ON t.id = tables_fts.rowid"
+                " WHERE tables_fts MATCH ?"
+                " AND t.table_kind = 'data'"
+                " ORDER BY score"
+                f" LIMIT {pool_size}"
+            )
+            all_rows = conn.execute(sql, params_fts).fetchall()
+            filtered = [r for r in all_rows if r["id"] in limit_ids]
+            return strategy, filtered[:top_n]
+
         params: list[object] = [fts_query]
         if file_year_params is not None:
             params.extend(file_year_params)
-        if with_year_filter and year_filter_clause:
+        if wf_clause and year_filter_clause:
             params.extend(year_filter_params)
+
         sql = (
             " SELECT"  # nosec B608
             " t.id, t.file, t.element_seq, t.element_id, t.page_id,"
             " t.file_year, t.file_month,"
             " t.title, t.section, t.caption, t.unit, t.period,"
-            " t.n_rows, t.n_cols,"
+            " t.n_rows, t.n_cols, t.signature,"
             " bm25(tables_fts, 2.0, 1.5, 1.5, 2.0, 2.5) AS score"
             " FROM tables_fts"
             " JOIN tables t ON t.id = tables_fts.rowid"
@@ -916,25 +1162,36 @@ def _fts_channel_trace(
     synonym_query = _fts_escape(synonym_tokens, mode="or")
 
     stages: list[tuple[str, Callable[[], list[sqlite3.Row]]]] = []
+
+    # Priority Stage: Year-Strict FTS. Only search tables that
+    # definitely contain the target years. This is the "Human Funnel"
+    # approach: narrow to 1940-compatible tables first, then search.
     if target_years and exact_query:
-        # Keep the window wide at SQL level (+4 covers ~95% of gold offsets
-        # in the benchmark). Offset ranking is left to _file_year_bonus in
-        # the reranker. Narrowing here silently dropped recall on questions
-        # with late republications (UID0006: 1995 target, gold at 1998_12,
-        # offset +3) — miss-classifier confirmed 103/137 @5 misses were
-        # `not_in_pool`, not ranking problems.
-        file_year_window = (min(target_years), max(target_years) + 4)
         stages.append(
             (
-                "exact_year_filter",
-                lambda query=exact_query, window=file_year_window: _run(
+                "exact_year_strict",
+                lambda query=exact_query: _run(
                     query,
-                    "exact_year_filter",
+                    "exact_year_strict",
                     with_year_filter=True,
-                    file_year_range=window,
                 )[1],
             )
         )
+        if synonym_query and synonym_query != exact_query:
+            stages.append(
+                (
+                    "synonym_year_strict",
+                    lambda query=synonym_query: _run(
+                        query,
+                        "synonym_year_strict",
+                        with_year_filter=True,
+                    )[1],
+                )
+            )
+
+    # Secondary Stage: Broad Window (allow later bulletins to cover the years)
+    if target_years and exact_query:
+        file_year_window = (min(target_years), max(target_years) + 5)
         stages.append(
             (
                 "exact_year_window",
@@ -1031,7 +1288,8 @@ def _metric_channel_trace(
     col_hint: str,
     target_years: list[int],
     wants_monthly: bool,
-    top_n: int = 400,
+    top_n: int = 1000,
+    limit_ids: set[int] | None = None,
 ) -> ChannelTrace:
     """Arena-style substring lookup over metrics.metric_slug + col_norm.
 
@@ -1054,7 +1312,7 @@ def _metric_channel_trace(
         if t not in seen:
             seen.add(t)
             uniq_terms.append(t)
-    terms = uniq_terms[:6]
+    terms = uniq_terms[:10]
     if not terms:
         return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
 
@@ -1065,7 +1323,7 @@ def _metric_channel_trace(
     # oracle mode. Skip in all those cases and let FTS carry the query.
     if not row_hint and len(terms) > 3:
         return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
-    if row_hint and len(row_hint.split()) > 8:
+    if row_hint and len(row_hint.split()) > 15:
         return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
     # "all <X> rows", "excluding...", "e.g....", "aggregates" — these are
     # instructions about which rows to pick, not literal row labels.
@@ -1080,7 +1338,11 @@ def _metric_channel_trace(
     col_norm_hint = normalize_metric_slug(col_hint)
 
     def _run_lookup(
-        source_text: str, exact_text: str, *, require_all_terms: bool
+        source_text: str,
+        exact_text: str,
+        *,
+        require_all_terms: bool,
+        with_year_filter: bool = False,
     ) -> list[sqlite3.Row]:
         source_terms = content_tokens(source_text)
         seen_terms = set()
@@ -1089,13 +1351,63 @@ def _metric_channel_trace(
             if term not in seen_terms:
                 seen_terms.add(term)
                 uniq_source_terms.append(term)
-        limited_terms = uniq_source_terms[:6]
+        limited_terms = uniq_source_terms[:10]
         if not limited_terms:
             return []
 
         join = " AND " if require_all_terms and len(limited_terms) > 1 else " OR "
         like_clauses = join.join(["metric_slug LIKE ?"] * len(limited_terms))
         like_params = [f"%{term}%" for term in limited_terms]
+
+        year_filter_clause = ""
+        year_filter_params: list[int] = []
+        if with_year_filter and target_years:
+            ty_placeholders = ",".join("?" * len(target_years))
+            month_restrict = "AND month_extracted IS NOT NULL" if wants_monthly else ""
+            year_filter_clause = (
+                " AND table_id IN ("
+                f" SELECT table_id FROM table_columns"
+                f" WHERE year_extracted IN ({ty_placeholders}) {month_restrict}"
+                " UNION"
+                f" SELECT table_id FROM table_rows"
+                f" WHERE year_extracted IN ({ty_placeholders}) {month_restrict}"
+                " )"
+            )
+            year_filter_params = target_years + target_years
+
+        limit_clause = ""
+
+        # When limit_ids is set, scan only rows for those tables using the table_id index,
+        # then apply the LIKE filter in Python. This avoids the query planner choosing
+        # the LIKE index (millions of rows) over the table_id index (N rows).
+        if limit_ids:
+            id_ph = ",".join("?" * len(limit_ids))
+            sql = (
+                " WITH candidate_rows AS ("
+                f"  SELECT table_id, metric_slug FROM row_label_lookup WHERE table_id IN ({id_ph})"
+                " ),"
+                " matched AS ("
+                " SELECT table_id, metric_slug,"
+                " CASE WHEN metric_slug = ? THEN 1 ELSE 0 END AS is_exact"
+                " FROM candidate_rows"
+                f" WHERE ({like_clauses})"
+                " ),"
+                " per_table AS ("
+                " SELECT table_id, COUNT(*) AS slug_hits, MAX(is_exact) AS had_exact"
+                " FROM matched GROUP BY table_id"
+                f" ORDER BY had_exact DESC, slug_hits DESC LIMIT {top_n}"
+                " )"
+                " SELECT t.id, t.file, t.element_seq, t.element_id, t.page_id,"
+                " t.file_year, t.file_month, t.title, t.section, t.caption,"
+                " t.unit, t.period, t.n_rows, t.n_cols, t.signature,"
+                " -(p.slug_hits + 5.0 * p.had_exact) AS score"
+                " FROM per_table p JOIN tables t ON t.id = p.table_id"
+                " WHERE t.table_kind = 'data' ORDER BY score"
+            )
+            return conn.execute(sql, [*limit_ids, exact_text, *like_params]).fetchall()
+
+        rll_filter = ""
+        rll_params: list = []
 
         sql = (
             " WITH matched AS ("  # nosec B608
@@ -1104,7 +1416,7 @@ def _metric_channel_trace(
             " rll.metric_slug,"
             " CASE WHEN rll.metric_slug = ? THEN 1 ELSE 0 END AS is_exact"
             " FROM row_label_lookup rll"
-            f" WHERE ({like_clauses})"
+            f" WHERE ({like_clauses}) {year_filter_clause} {rll_filter}"
             " LIMIT 5000"
             " ),"
             " per_table AS ("
@@ -1121,14 +1433,17 @@ def _metric_channel_trace(
             " t.id, t.file, t.element_seq, t.element_id, t.page_id,"
             " t.file_year, t.file_month,"
             " t.title, t.section, t.caption, t.unit, t.period,"
-            " t.n_rows, t.n_cols,"
+            " t.n_rows, t.n_cols, t.signature,"
             " -(p.slug_hits + 5.0 * p.had_exact) AS score"
             " FROM per_table p"
             " JOIN tables t ON t.id = p.table_id"
             " WHERE t.table_kind = 'data'"
+            f" {limit_clause}"
             " ORDER BY score"
         )
-        return list(conn.execute(sql, [exact_text, *like_params]))
+        return conn.execute(
+            sql, [exact_text, *like_params, *year_filter_params, *rll_params]
+        ).fetchall()
 
     row_variants = _row_hint_variants(row_hint)
     synonym_sources: list[str] = []
@@ -1142,6 +1457,19 @@ def _metric_channel_trace(
 
     stages: list[tuple[str, Callable[[], list[sqlite3.Row]]]] = []
     if exact_slug:
+        # Priority: Year-Strict Metric match
+        if target_years:
+            stages.append(
+                (
+                    "primary_exact_year",
+                    lambda src=source, slug=exact_slug: _run_lookup(
+                        src,
+                        slug,
+                        require_all_terms=True,
+                        with_year_filter=True,
+                    ),
+                )
+            )
         stages.append(
             (
                 "primary_exact",
@@ -1154,6 +1482,24 @@ def _metric_channel_trace(
         )
 
     if synonym_sources:
+        if target_years:
+            stages.append(
+                (
+                    "synonym_exact_year",
+                    lambda alts=synonym_sources: _merge_ranked_rows(
+                        *[
+                            _run_lookup(
+                                alt_source,
+                                alt_source,
+                                require_all_terms=True,
+                                with_year_filter=True,
+                            )
+                            for alt_source in alts
+                        ],
+                        top_n=top_n,
+                    ),
+                )
+            )
         stages.append(
             (
                 "synonym_exact",
@@ -1169,6 +1515,25 @@ def _metric_channel_trace(
 
     partial_sources = [exact_slug, *synonym_sources]
     if partial_sources:
+        if target_years:
+            stages.append(
+                (
+                    "partial_match_year",
+                    lambda alts=partial_sources: _merge_ranked_rows(
+                        *[
+                            _run_lookup(
+                                partial_source,
+                                partial_source,
+                                require_all_terms=False,
+                                with_year_filter=True,
+                            )
+                            for partial_source in alts
+                            if partial_source
+                        ],
+                        top_n=top_n,
+                    ),
+                )
+            )
         stages.append(
             (
                 "partial_match",
@@ -1334,384 +1699,392 @@ def _prose_footnote_channel(
 # ── Top-level retrieve (two-channel union) ──────────────────────────────────
 
 
-def retrieve(
-    plan: dict | None,
-    question: str,
-    top_k: int = 10,
-    verbose: bool = False,
-    dedupe_by_file: bool = True,
-    load_html: bool = True,
-    vintage: str = "latest",
-    max_per_file: int | None = None,
-) -> list[dict]:
-    """Multi-request, multi-channel ledger retrieval — FTS ∪ metric — reranked
-    and returned as shape-compatible dicts for extract.py.
+class _RetrievalContext:
+    def __init__(self, plan: dict | None, question: str):
+        self.plan = plan
+        self.question = question
+        self.hints = _extract_hints(plan, question)
+        self.year_mode = detect_year_mode(question)
+        self.wants_monthly = _detect_wants_monthly(question)
+        self.direct_refs = parse_direct_bulletin_refs(question)
+        self.direct_files = {f"treasury_bulletin_{yr}_{mo:02d}.json" for yr, mo in self.direct_refs}
 
-    Processes ALL data_requests in the plan, running the metric channel for
-    each request's row_hint + row_hint_alternatives. Period-aware scoring
-    boosts tables whose period matches the question's year mode and penalizes
-    mismatches.
-    """
-    conn = _ledger_conn()
+        self.all_metrics: list[str] = []
+        self.all_row_hints: list[str] = []
+        self.all_col_hints: list[str] = []
+        self.all_target_years: set[int] = set()
+        self.corpus_row_hints: list[str] = []
+        self.requested_granularities: set[str] = set()
 
-    hints = _extract_hints(plan, question)
-    year_mode = detect_year_mode(question)
-    wants_monthly = _detect_wants_monthly(question)
+        for h in self.hints:
+            if h["metric"]:
+                self.all_metrics.append(h["metric"])
+            if h["row_hint"]:
+                self.all_row_hints.append(h["row_hint"])
+            if h["col_hint"]:
+                self.all_col_hints.append(h["col_hint"])
+            self.all_target_years.update(h["years"])
 
-    direct_refs = parse_direct_bulletin_refs(question)
-    direct_files = {f"treasury_bulletin_{yr}_{mo:02d}.json" for yr, mo in direct_refs}
+            if h.get("source") == "corpus" and h["row_hint"]:
+                self.corpus_row_hints.append(h["row_hint"])
+                for alt in h.get("row_hint_alternatives") or []:
+                    alt = str(alt).strip()
+                    if alt:
+                        self.corpus_row_hints.append(alt)
+            if h.get("source") == "corpus" and h.get("granularity"):
+                self.requested_granularities.add(h["granularity"])
 
-    # Aggregate query tokens and target years across ALL data_requests
-    all_metrics: list[str] = []
-    all_row_hints: list[str] = []
-    all_col_hints: list[str] = []
-    all_target_years: set[int] = set()
-    for h in hints:
-        if h["metric"]:
-            all_metrics.append(h["metric"])
-        if h["row_hint"]:
-            all_row_hints.append(h["row_hint"])
-        if h["col_hint"]:
-            all_col_hints.append(h["col_hint"])
-        all_target_years.update(h["years"])
+        self.target_years = sorted(self.all_target_years)
+        self.query_text = f"{question} {' '.join(self.all_metrics)} {' '.join(self.all_row_hints)} {' '.join(self.all_col_hints)}".strip()
+        self.q_tokens = content_tokens(self.query_text)
 
-    target_years = sorted(all_target_years)
+        self.title_patterns: list[str] = []
+        for phrase in self.all_row_hints + self.all_col_hints + self.all_metrics:
+            p = (phrase or "").strip().lower()
+            if p and len(p) >= 3 and p not in self.title_patterns:
+                self.title_patterns.append(p)
 
-    query_text = f"{question} {' '.join(all_metrics)} {' '.join(all_row_hints)} {' '.join(all_col_hints)}".strip()
-    q_tokens = content_tokens(query_text)
+
+def _find_candidate_families(conn: sqlite3.Connection, ctx: _RetrievalContext) -> set[str]:
+    # Narrow by year first (aggressive gate)
+    if not ctx.target_years:
+        rows = conn.execute("SELECT family_id FROM table_families").fetchall()
+        return {r[0] for r in rows if r[0]}
+
+    ph = ",".join("?" * len(ctx.target_years))
+    year_rows = conn.execute(
+        f"SELECT DISTINCT family_id FROM table_family_years WHERE year IN ({ph})", ctx.target_years
+    ).fetchall()
+    candidate_fids = {r[0] for r in year_rows if r[0]}
+
+    # Narrow by column tokens if we have many families left
+    if len(candidate_fids) > 100 and ctx.all_col_hints:
+        col_tokens = []
+        for hint in ctx.all_col_hints:
+            col_tokens.extend(re.findall(r"[a-z0-9]{3,}", hint.lower()))
+
+        if col_tokens:
+            col_tokens = list(set(col_tokens))[:3]  # Very selective
+            fid_list = list(candidate_fids)
+            ph_fid = ",".join("?" * len(fid_list))
+            like_clauses = " OR ".join(["col_leaf_lower LIKE ?" for _ in col_tokens])
+            like_params = [f"%{t}%" for t in col_tokens]
+
+            sql = f"SELECT DISTINCT family_id FROM table_family_columns WHERE family_id IN ({ph_fid}) AND ({like_clauses})"
+            col_rows = conn.execute(sql, (*fid_list, *like_params)).fetchall()
+            col_fids = {r[0] for r in col_rows if r[0]}
+            if col_fids:
+                candidate_fids &= col_fids
+
+    return candidate_fids
+
+
+def _get_best_instances_for_families(
+    conn: sqlite3.Connection, families: set[str], target_years: list[int]
+) -> set[int]:
+    if not families:
+        return set()
+
+    fid_ph = ",".join("?" * len(families))
+    fid_list = list(families)
+
+    if target_years:
+        # Per (family, year): pick the latest bulletin instance that actually contains
+        # that year in its columns/rows. Precomputed as best_table_id in table_family_years.
+        # Falls back to latest_table_id if best_table_id column not yet built.
+        has_best = conn.execute(
+            "SELECT COUNT(*) FROM pragma_table_info('table_family_years') WHERE name='best_table_id'"
+        ).fetchone()[0]
+        if has_best:
+            year_ph = ",".join("?" * len(target_years))
+            rows = conn.execute(
+                f"""SELECT DISTINCT best_table_id FROM table_family_years
+                    WHERE family_id IN ({fid_ph}) AND year IN ({year_ph})
+                    AND best_table_id IS NOT NULL""",
+                (*fid_list, *target_years),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT latest_table_id FROM table_families WHERE family_id IN ({fid_ph}) AND latest_table_id IS NOT NULL",
+                fid_list,
+            ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT latest_table_id FROM table_families WHERE family_id IN ({fid_ph}) AND latest_table_id IS NOT NULL",
+            fid_list,
+        ).fetchall()
+    return {int(r[0]) for r in rows}
+
+
+def _run_search_channels(conn: sqlite3.Connection, ctx: _RetrievalContext, limit_ids: set[int]):
+    top_n = 200
+    # Load limit_ids into a temp table once so FTS and metric channels can join
+    # against it efficiently instead of using IN (N ids) which is slow on FTS5.
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _fts_limit_ids (id INTEGER PRIMARY KEY)")
+    conn.execute("DELETE FROM _fts_limit_ids")
+    if limit_ids:
+        conn.executemany(
+            "INSERT OR IGNORE INTO _fts_limit_ids VALUES (?)", [(i,) for i in limit_ids]
+        )
 
     fts_trace = _fts_channel_trace(
         conn,
-        q_tokens,
-        target_years,
-        wants_monthly,
-        source_text=query_text,
-        year_mode=year_mode,
+        ctx.q_tokens,
+        ctx.target_years,
+        ctx.wants_monthly,
+        source_text=ctx.query_text,
+        year_mode=ctx.year_mode,
+        limit_ids=limit_ids,
+        top_n=top_n,
     )
 
-    # Run metric channel for EACH data_request, including alternatives
     all_metric_rows: list[sqlite3.Row] = []
     all_metric_strategy_by_id: dict[int, str] = {}
-    all_metric_attempts: list[tuple[str, int]] = []
-    seen_metric_ids: set[int] = set()
+    seen_ids = set()
 
-    for h in hints:
-        metric = h["metric"]
-        row_hint = h["row_hint"]
-        col_hint = h["col_hint"]
-        dr_years = h["years"]
-
-        # Primary metric channel call with the main row_hint
+    for h in ctx.hints:
         trace = _metric_channel_trace(
             conn,
-            metric,
-            row_hint,
-            col_hint,
-            dr_years,
-            wants_monthly,
+            h["metric"],
+            h["row_hint"],
+            h["col_hint"],
+            h["years"],
+            ctx.wants_monthly,
+            limit_ids=limit_ids,
+            top_n=top_n,
         )
         for r in trace.rows:
             rid = int(r["id"])
-            if rid not in seen_metric_ids:
-                seen_metric_ids.add(rid)
+            if rid not in seen_ids:
+                seen_ids.add(rid)
                 all_metric_rows.append(r)
                 if rid in trace.strategy_by_id:
                     all_metric_strategy_by_id[rid] = trace.strategy_by_id[rid]
-        all_metric_attempts.extend(trace.attempts)
 
-        # Also run metric channel for each row_hint_alternative
-        for alt in h["row_hint_alternatives"]:
-            alt_trace = _metric_channel_trace(
-                conn,
-                metric,
-                alt,
-                col_hint,
-                dr_years,
-                wants_monthly,
-            )
-            for r in alt_trace.rows:
-                rid = int(r["id"])
-                if rid not in seen_metric_ids:
-                    seen_metric_ids.add(rid)
-                    all_metric_rows.append(r)
-                    # Use "alt:<alternative>" strategy label
-                    if rid in alt_trace.strategy_by_id:
-                        all_metric_strategy_by_id[rid] = f"alt:{alt_trace.strategy_by_id[rid]}"
-            all_metric_attempts.extend(alt_trace.attempts)
-
-    # Build a synthetic metric_trace-like structure for downstream
     class _MergedTrace:
-        rows: list[sqlite3.Row]
-        strategy_by_id: dict[int, str]
-        attempts: list[tuple[str, int]]
+        rows = all_metric_rows
+        strategy_by_id = all_metric_strategy_by_id
+        attempts = []
 
-    metric_trace = _MergedTrace()
-    metric_trace.rows = all_metric_rows
-    metric_trace.strategy_by_id = all_metric_strategy_by_id
-    metric_trace.attempts = all_metric_attempts
+    pf_hits = _prose_footnote_channel(conn, ctx.q_tokens, ctx.target_years, top_n=50)
+    return fts_trace, _MergedTrace(), pf_hits
 
-    pf_hits = _prose_footnote_channel(conn, q_tokens, target_years)
-    fts_rows = fts_trace.rows
-    metric_rows = metric_trace.rows
 
-    def _normalize_channel(rows: list[sqlite3.Row]) -> dict[int, float]:
+def _rank_candidates(
+    conn: sqlite3.Connection,
+    ctx: _RetrievalContext,
+    fts_trace,
+    metric_trace,
+    limit_ids: set[int],
+    top_k: int,
+):
+    def _normalize(rows) -> dict[int, float]:
         if not rows:
             return {}
-        raw = [-r["score"] for r in rows]  # lower bm25 == better → flip
+        raw = [-r["score"] for r in rows]
         smax = max(raw) or 1.0
         return {r["id"]: (rr / smax) for r, rr in zip(rows, raw, strict=True)}
 
-    fts_norm = _normalize_channel(fts_rows)
-    metric_norm = _normalize_channel(metric_rows)
+    fts_norm = _normalize(fts_trace.rows)
+    metric_norm = _normalize(metric_trace.rows)
 
-    rows_by_id: dict[int, sqlite3.Row] = {}
-    for r in fts_rows:
-        rows_by_id[r["id"]] = r
-    for r in metric_rows:
+    rows_by_id = {r["id"]: r for r in fts_trace.rows}
+    for r in metric_trace.rows:
         rows_by_id.setdefault(r["id"], r)
 
-    # Union-mode with the metric channel as a precision bonus over FTS.
-    # Filter-mode (metric as candidate pool, FTS as reranker) regressed
-    # recall on 246 because the metric channel's pool is too narrow —
-    # OCR variants and alternate phrasings slip through FTS but not
-    # substring match. Keep FTS as the broad recall channel and let the
-    # metric channel nudge the ranking when its guard allows it to fire.
     all_ids = set(fts_norm) | set(metric_norm)
     if not all_ids:
-        if verbose:
-            print(f"  no hits (fts={len(fts_rows)} metric={len(metric_rows)})", flush=True)
         return []
 
-    # Vintage supersession: when vintage=="latest" (default), penalize
-    # candidate tables that have a newer sibling with the same signature —
-    # those are stale republications. When vintage=="as_reported", skip
-    # the penalty so originally-reported values can surface.
-    superseded_ids: set[int] = set()
-    if vintage == "latest" and all_ids:
-        placeholders = ",".join("?" * len(all_ids))
-        rows_ss = conn.execute(
-            f"""
-            SELECT t.id FROM tables t
-            WHERE t.id IN ({placeholders})
-              AND EXISTS (
-                SELECT 1 FROM tables t2
-                WHERE t2.signature = t.signature
-                  AND t2.parse_ok = 1
-                  AND t2.table_kind = 'data'
-                  AND (t2.file_year * 100 + COALESCE(t2.file_month, 0))
-                    > (t.file_year * 100 + COALESCE(t.file_month, 0))
-              )
-            """,
-            tuple(all_ids),
-        ).fetchall()
-        superseded_ids = {int(r[0]) for r in rows_ss}
+    compat = _candidate_compatibility(
+        conn,
+        all_ids,
+        ctx.corpus_row_hints,
+        ctx.all_col_hints,
+        ctx.target_years,
+        ctx.requested_granularities,
+    )
+    all_ids = _apply_year_compatibility_filter(all_ids, compat, ctx.target_years, top_k)
+    all_ids = _apply_structure_compatibility_filter(
+        all_ids, compat, ctx.requested_granularities, ctx.all_col_hints, top_k
+    )
 
-    # Ground-truth row probe: for each candidate table, find the best
-    # row whose metric_slug matches any DR row_hint and count its
-    # non-null cells. Used as a score boost, NOT a hard filter — we
-    # learned that decompose often emits slightly-off row_hints ("Net
-    # interest" vs "Interest, net of receipts") that would wrongly drop
-    # the gold table. The scoring reward is strong enough to lift clean
-    # matches above keyword-only FTS hits without losing anything.
-    probe_stats = _bulk_cell_probe(conn, all_ids, all_row_hints)
-    max_best_row_cells = max((v[1] for v in probe_stats.values() if v[0] > 0), default=0)
+    probe_stats = {
+        tid: (state.row_match_count, state.best_row_non_null_cells)
+        for tid, state in compat.items()
+        if tid in all_ids
+    }
+    max_best_row_cells = max((v[1] for v in probe_stats.values()), default=0)
 
-    # Title/caption substring matching: Treasury tables reuse title phrases
-    # like "Budget Receipts and Expenditures" or "Internal Revenue
-    # Collections". If the decompose row_hint/col_hint appears in the
-    # table's title or caption, that's strong structured evidence the
-    # table is topical beyond bag-of-words FTS.
-    title_patterns: list[str] = []
-    for phrase in all_row_hints + all_col_hints + all_metrics:
-        p = (phrase or "").strip().lower()
-        if p and len(p) >= 3 and p not in title_patterns:
-            title_patterns.append(p)
+    superseded_ids = set()
+    try:
+        rows = conn.execute("SELECT table_id FROM supersessions").fetchall()
+        superseded_ids = {int(r[0]) for r in rows}
+    except Exception:
+        pass
 
-    weighted_channel_scores: dict[int, tuple[float, float]] = {}
-    reranked: list[tuple[float, sqlite3.Row]] = []
+    final_ranked = []
     for tid in all_ids:
         row = rows_by_id[tid]
-        matching_rows, best_row_cells = probe_stats.get(tid, (0, 0))
-        fts_weighted = 0.75 * fts_norm.get(tid, 0.0)
-        metric_weighted = 0.25 * metric_norm.get(tid, 0.0)
-        weighted_channel_scores[tid] = (fts_weighted, metric_weighted)
-        s = metric_weighted + fts_weighted
-        s += _strategy_score_nudge(
-            fts_trace.strategy_by_id.get(tid),
-            metric_trace.strategy_by_id.get(tid),
+        state = compat.get(tid, CandidateCompatibility())
+        match_rows, best_cells = probe_stats.get(tid, (0, 0))
+
+        score = 0.75 * fts_norm.get(tid, 0.0) + 0.25 * metric_norm.get(tid, 0.0)
+        score += _strategy_score_nudge(
+            fts_trace.strategy_by_id.get(tid), metric_trace.strategy_by_id.get(tid)
         )
-        if max_best_row_cells > 0 and matching_rows > 0:
-            # Reward the table whose best matching row has the most
-            # non-null cells — that's the one most likely to supply a
-            # full monthly or multi-year series. Peak 5.0 so it strongly
-            # outweighs minor FTS+metric differences.
-            s += 5.0 * (best_row_cells / max_best_row_cells)
-            # Penalize row-label ambiguity: if the hint matches many
-            # rows, the DR is harder to pin down in this table. Small
-            # penalty, grows slowly.
-            if matching_rows > 1:
-                s -= 0.05 * min(matching_rows - 1, 8)
-        # Title/caption match bonus (domain-aware, cheap).
-        title_text = " ".join(
-            [
-                (row["title"] or "").lower(),
-                (row["caption"] or "").lower(),
-            ]
-        )
-        if title_text and title_patterns:
-            hits = sum(1 for p in title_patterns if p in title_text)
+
+        if max_best_row_cells > 0 and match_rows > 0:
+            score += 5.0 * (best_cells / max_best_row_cells)
+            if match_rows > 1:
+                score -= 0.05 * min(match_rows - 1, 8)
+
+        if ctx.target_years and state.matching_target_years_count > 0:
+            score += 2.0 * (state.matching_target_years_count / len(ctx.target_years))
+
+        if state.has_col_hint_match:
+            score += 0.45 + 0.10 * min(state.col_match_count, 3)
+        if ctx.wants_monthly and state.has_month_data:
+            score += 0.35
+        elif ctx.wants_monthly and ctx.requested_granularities and not state.has_month_data:
+            score -= 0.25
+        if ctx.requested_granularities and state.has_required_granularity:
+            score += 0.20
+
+        title_text = f"{row['title'] or ''} {row['caption'] or ''}".lower()
+        if title_text and ctx.title_patterns:
+            hits = sum(1 for p in ctx.title_patterns if p in title_text)
             if hits:
-                s += 0.25 * min(hits, 3)
-        s += 0.12 * _file_year_bonus(
-            row["file_year"],
-            row["file_month"],
-            target_years,
-            year_mode,
+                score += 0.25 * min(hits, 3)
+
+        score += 0.12 * _file_year_bonus(
+            row["file_year"], row["file_month"], ctx.target_years, ctx.year_mode
         )
-        # Period-aware scoring: scaled by 0.2 so period acts as a gentle
-        # tiebreaker rather than dominating FTS+metric relevance scores.
-        # Raw delta has 0.8 range (+0.5/-0.3) which nearly matches the
-        # entire FTS+metric range (0-1.0); the 0.2 scaling keeps it as a
-        # tiebreaker (+0.10/-0.06). Unknown mode or empty period → 0.0.
-        s += 0.2 * _period_aware_score_delta(year_mode, row["period"])
+        score += 0.2 * _period_aware_score_delta(ctx.year_mode, row["period"])
         if tid in superseded_ids:
-            s -= 0.30
-        if direct_files and row["file"] in direct_files:
-            s += 5.0
-        reranked.append((s, row))
-    reranked.sort(key=lambda x: -x[0])
+            score -= 0.30
+        if ctx.direct_files and row["file"] in ctx.direct_files:
+            score += 5.0
 
-    if verbose:
-        print(
-            f"  fts={len(fts_rows)} metric={len(metric_rows)} pf={len(pf_hits)}"
-            f" union={len(all_ids)} years={target_years} mode={year_mode}"
-            f" fts_attempts={fts_trace.attempts} metric_attempts={metric_trace.attempts}",
-            flush=True,
+        final_ranked.append(
+            (
+                score,
+                row,
+                state,
+                (match_rows, best_cells),
+                fts_norm.get(tid, 0.0),
+                metric_norm.get(tid, 0.0),
+                fts_trace,
+                metric_trace,
+            )
         )
 
-    # Per-file cap: if max_per_file is set, it takes precedence. Otherwise,
-    # dedupe_by_file=True collapses to cap=1 (legacy behavior); False → no cap.
-    file_cap = max_per_file if max_per_file is not None else 1 if dedupe_by_file else None
+    return sorted(final_ranked, key=lambda x: -x[0])
 
-    entries: list[dict] = []
-    file_counts: dict[str, int] = {}
-    for _score, r in reranked:
-        row_id = int(r["id"])
-        file = r["file"]
+
+def _build_entries(conn, ctx, ranked, pf_hits, top_k, dedupe_by_file, max_per_file, load_html):
+    file_cap = max_per_file if max_per_file is not None else 1 if dedupe_by_file else None
+    entries = []
+    file_counts = {}
+
+    for _score, r, state, probe_res, fts_norm_v, metric_norm_v, fts_trace, metric_trace in ranked:
+        row_id, file = int(r["id"]), r["file"]
         if file_cap is not None and file_counts.get(file, 0) >= file_cap:
             continue
         file_counts[file] = file_counts.get(file, 0) + 1
 
         cols = conn.execute(
-            "SELECT col_path FROM table_columns WHERE table_id = ? ORDER BY col_index",
-            (r["id"],),
+            "SELECT col_path FROM table_columns WHERE table_id = ? ORDER BY col_index", (row_id,)
         ).fetchall()
         labels = conn.execute(
             "SELECT row_path FROM table_rows WHERE table_id = ? ORDER BY row_index LIMIT 80",
-            (r["id"],),
+            (row_id,),
         ).fetchall()
-        year_rows = conn.execute(
-            """
+        years = sorted(
+            [
+                int(y[0])
+                for y in conn.execute(
+                    """
             SELECT DISTINCT year FROM (
                 SELECT year_extracted AS year FROM table_columns WHERE table_id = ?
                 UNION
                 SELECT year_extracted AS year FROM table_rows    WHERE table_id = ?
-            ) WHERE year IS NOT NULL
-            """,
-            (r["id"], r["id"]),
-        ).fetchall()
-        years = sorted(int(y[0]) for y in year_rows if y[0] is not None)
+            ) WHERE year IS NOT NULL""",
+                    (row_id, row_id),
+                ).fetchall()
+            ]
+        )
 
-        strategy_parts = []
+        strategy = []
         if row_id in fts_trace.strategy_by_id:
-            strategy_parts.append(f"fts:{fts_trace.strategy_by_id[row_id]}")
+            strategy.append(f"fts:{fts_trace.strategy_by_id[row_id]}")
         if row_id in metric_trace.strategy_by_id:
-            strategy_parts.append(f"metric:{metric_trace.strategy_by_id[row_id]}")
-        fts_weighted, metric_weighted = weighted_channel_scores.get(row_id, (0.0, 0.0))
-        best_channel = "fts" if fts_weighted >= metric_weighted else "metric"
-        probe_rows, probe_cells = probe_stats.get(row_id, (0, 0))
+            strategy.append(f"metric:{metric_trace.strategy_by_id[row_id]}")
 
-        # Fetch adjacent prose/footnotes for unit/context metadata
-        # Broadened: include all prose/footnotes on the same page to catch
-        # distant unit markers (e.g. in section headers or page headers).
-        near_prose = conn.execute(
-            "SELECT content FROM prose WHERE file = ? AND page_id = ?",
-            (file, r["page_id"]),
-        ).fetchall()
-        near_footnotes = conn.execute(
-            "SELECT content FROM footnotes WHERE file = ? AND page_id = ?",
-            (file, r["page_id"]),
-        ).fetchall()
-
-        entry = {
-            "probe_matched_rows": int(probe_rows),
-            "probe_best_cells": int(probe_cells),
-            "file": file,
-            "element_id": r["element_id"],
-            "element_seq": r["element_seq"],
-            "page_id": r["page_id"],
-            "file_year": r["file_year"],
-            "file_month": r["file_month"],
-            "section": r["section"] or "",
-            "title": r["title"] or "",
-            "caption": r["caption"] or "",
-            "near_content": [p[0] for p in near_prose] + [f[0] for f in near_footnotes],
-            "column_headers": [c[0] or "" for c in cols],
-            "row_labels": [lab[0] or "" for lab in labels],
-            "years": years,
-            "unit": r["unit"],
-            "period": r["period"],
-            "n_rows": r["n_rows"],
-            "n_cols": r["n_cols"],
-            "retrieval_strategy": " | ".join(strategy_parts),
-            "retrieval_channel": best_channel,
-            "html": _load_element_html(file, r["element_seq"]) if load_html else "",
-        }
-        entries.append(entry)
+        entries.append(
+            {
+                "probe_matched_rows": probe_res[0],
+                "probe_best_cells": probe_res[1],
+                "probe_col_matches": state.col_match_count,
+                "has_target_year": state.has_target_year,
+                "has_month_data": state.has_month_data,
+                "has_required_granularity": state.has_required_granularity,
+                "file": file,
+                "element_id": r["element_id"],
+                "element_seq": r["element_seq"],
+                "page_id": r["page_id"],
+                "signature": r["signature"],
+                "file_year": r["file_year"],
+                "file_month": r["file_month"],
+                "section": r["section"] or "",
+                "title": r["title"] or "",
+                "caption": r["caption"] or "",
+                "near_content": [
+                    p[0]
+                    for p in conn.execute(
+                        "SELECT content FROM prose WHERE file = ? AND page_id = ?",
+                        (file, r["page_id"]),
+                    ).fetchall()
+                ]
+                + [
+                    f[0]
+                    for f in conn.execute(
+                        "SELECT content FROM footnotes WHERE file = ? AND page_id = ?",
+                        (file, r["page_id"]),
+                    ).fetchall()
+                ],
+                "column_headers": [c[0] or "" for c in cols],
+                "row_labels": [lab[0] or "" for lab in labels],
+                "years": years,
+                "unit": r["unit"],
+                "period": r["period"],
+                "n_rows": r["n_rows"],
+                "n_cols": r["n_cols"],
+                "retrieval_strategy": " | ".join(strategy),
+                "retrieval_channel": "fts" if fts_norm_v >= metric_norm_v else "metric",
+                "html": _load_element_html(file, r["element_seq"]) if load_html else "",
+            }
+        )
         if len(entries) >= top_k:
             break
 
-    # ── Supplementary prose/footnote entries ──────────────────────────────
-    # Add prose/footnote entries as supplementary context (up to PF_MAX_SLOTS).
-    # Unlike table entries, PF entries are NOT deduplicated by file — they carry
-    # different content (element_seq ≠ table element_seq) and may include
-    # footnotes or prose that modify/explain table values. This is the key
-    # channel for ~6% of benchmark questions where the answer is in footnotes.
-    # We use a separate seen_element set to avoid exact duplicates.
-    _PF_MAX_SLOTS = 3
     if pf_hits:
-        seen_elements: set[tuple[str, int]] = set()
-        # Pre-populate with element_seqs from already-added table entries
-        for e in entries:
-            seen_elements.add((e["file"], e["element_seq"]))
-
-        # Collect best-scoring PF hit per (file, source) combination
-        pf_by_key: dict[tuple[str, str], dict] = {}
-        for hit in pf_hits:
-            key = (hit["file"], hit["source"])
-            if key not in pf_by_key or hit["score"] < pf_by_key[key]["score"]:
-                pf_by_key[key] = hit
-
-        pf_added = 0
-        for hit in sorted(pf_by_key.values(), key=lambda h: h["score"]):
-            if pf_added >= _PF_MAX_SLOTS:
+        seen = {(e["file"], e["element_seq"]) for e in entries}
+        added = 0
+        for hit in sorted(pf_hits, key=lambda x: x["score"]):
+            if added >= 3:
                 break
-            elem_key = (hit["file"], hit["element_seq"])
-            if elem_key in seen_elements:
+            if (hit["file"], hit["element_seq"]) in seen:
                 continue
-            seen_elements.add(elem_key)
-
-            # Apply file-year bonus to filter time-irrelevant PF entries
-            pf_file_bonus = _file_year_bonus(
-                hit.get("file_year"),
-                hit.get("file_month"),
-                target_years,
-                year_mode,
-            )
-            # Only include PF entries with reasonable year proximity
-            if target_years and pf_file_bonus == 0.0:
+            if (
+                ctx.target_years
+                and _file_year_bonus(
+                    hit.get("file_year"), hit.get("file_month"), ctx.target_years, ctx.year_mode
+                )
+                == 0
+            ):
                 continue
-
+            seen.add((hit["file"], hit["element_seq"]))
             entries.append(
                 {
                     "file": hit["file"],
@@ -1737,12 +2110,41 @@ def retrieve(
                     "near_table_id": hit.get("near_table_id"),
                 }
             )
-            pf_added += 1
-
-    # PF entries are intentionally supplementary (up to PF_MAX_SLOTS extra)
-    # beyond the table top_k limit. The table loop already enforces
-    # `if len(entries) >= top_k: break`, so slicing would remove PF entries.
+            added += 1
     return entries
+
+
+def retrieve(
+    plan: dict | None,
+    question: str,
+    top_k: int = 10,
+    verbose: bool = False,
+    dedupe_by_file: bool = True,
+    load_html: bool = True,
+    vintage: str = "latest",
+    max_per_file: int | None = None,
+    debug_meta: dict | None = None,
+) -> list[dict]:
+    conn = _ledger_conn()
+    ctx = _RetrievalContext(plan, question)
+
+    fids = _find_candidate_families(conn, ctx)
+    if verbose:
+        print(f"  family funnel: {len(fids)} families", flush=True)
+
+    limit_ids = _get_best_instances_for_families(conn, fids, ctx.target_years)
+    if verbose:
+        print(f"  narrowed to {len(limit_ids)} best instances", flush=True)
+
+    if not limit_ids:
+        return []
+
+    fts_trace, metric_trace, pf_hits = _run_search_channels(conn, ctx, limit_ids)
+    ranked = _rank_candidates(conn, ctx, fts_trace, metric_trace, limit_ids, top_k)
+
+    return _build_entries(
+        conn, ctx, ranked, pf_hits, top_k, dedupe_by_file, max_per_file, load_html
+    )
 
 
 def retrieve_from_question(question: str, top_k: int = 10) -> list[dict]:

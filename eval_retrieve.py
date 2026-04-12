@@ -2,9 +2,9 @@
 """Measure retrieve_v2.retrieve() recall@K against gold source files.
 
 Loads cached decompose specs from decompose_eval.full.jsonl so we never
-hit the LLM. Runs retrieve() with ``top_k=TOP_K`` (50) and records whether
-any gold source file appears within ranks 5, 10, 20, 30, and 50 of the
-retrieved list.
+hit the LLM. Runs retrieve() with a deeper table pool, then computes file
+recall from the first 50 unique files and table recall from the raw table
+ranking.
 """
 
 import argparse
@@ -25,6 +25,7 @@ sys.stdout.reconfigure(line_buffering=True)
 CACHE = Path("decompose_eval.full.jsonl")
 CSV_PATH = Path("officeqa_full.csv")
 TOP_K = 50
+TABLE_TOP_K = 200
 WORKERS = 12
 URL_PAGE_RE = re.compile(r"[?&]page=(\d+)")
 _TLS = threading.local()
@@ -83,21 +84,54 @@ def run_one(row: dict, csv_row: dict | None) -> dict:
 
     t0 = time.time()
     try:
-        results = retrieve(spec, row["question"], top_k=TOP_K, load_html=False)
+        debug_meta: dict = {}
+        results = retrieve(
+            spec,
+            row["question"],
+            top_k=TABLE_TOP_K,
+            load_html=False,
+            dedupe_by_file=False,
+            debug_meta=debug_meta,
+        )
     except Exception as e:
         return {"uid": row["uid"], "error": f"{type(e).__name__}: {e}"}
 
     conn = _conn()
-    retrieved_stems = [stem(r["file"]) for r in results]
+    retrieved_table_stems = [stem(r["file"]) for r in results]
+    retrieved_stems: list[str] = []
+    seen_files: set[str] = set()
+    for table_stem in retrieved_table_stems:
+        if table_stem in seen_files:
+            continue
+        seen_files.add(table_stem)
+        retrieved_stems.append(table_stem)
     ranks = [i + 1 for i, s in enumerate(retrieved_stems) if s in gold]
     first_hit = ranks[0] if ranks else None
     gold_locs = parse_gold_locations(
         (csv_row or {}).get("source_docs", ""),
         (csv_row or {}).get("source_files", ""),
     )
+    gold_signatures: set[str] = set()
+    gold_titles: set[str] = set()
+    for g_file, g_page in gold_locs:
+        sig_rows = conn.execute(
+            "SELECT signature, title FROM tables WHERE file = ? AND page_id = ? AND table_kind = 'data'",
+            (g_file, g_page),
+        ).fetchall()
+        for sig_row in sig_rows:
+            if sig_row[0]:
+                gold_signatures.add(sig_row[0])
+            if sig_row[1]:
+                gold_titles.add(sig_row[1])
+
     retrieved_locs = [(r["file"], r["page_id"]) for r in results]
     table_ranks = [i + 1 for i, loc in enumerate(retrieved_locs) if loc in gold_locs]
     first_table_hit = table_ranks[0] if table_ranks else None
+
+    retrieved_titles = [r.get("title") for r in results]
+    retrieved_signatures = [r.get("signature") for r in results]
+    family_ranks = [i + 1 for i, t in enumerate(retrieved_titles) if t and t in gold_titles]
+    first_family_hit = family_ranks[0] if family_ranks else None
 
     table_ids: list[int] = []
     for r in results:
@@ -119,8 +153,11 @@ def run_one(row: dict, csv_row: dict | None) -> dict:
     return {
         "uid": row["uid"],
         "gold": list(gold),
-        # Output field name is legacy; value is up to TOP_K (50) stems, not 20.
+        "gold_signatures": list(gold_signatures),
+        # Output field name is legacy; value is up to TOP_K (50) unique file stems.
         "retrieved_top20": retrieved_stems,
+        "retrieved_table_top20": retrieved_table_stems,
+        "retrieved_signatures": retrieved_signatures,
         "first_hit_rank": first_hit,
         "hit_at_5": first_hit is not None and first_hit <= 5,
         "hit_at_10": first_hit is not None and first_hit <= 10,
@@ -131,11 +168,18 @@ def run_one(row: dict, csv_row: dict | None) -> dict:
         "table_hit_at_10": first_table_hit is not None and first_table_hit <= 10,
         "table_hit_at_20": first_table_hit is not None and first_table_hit <= 20,
         "table_hit_at_30": first_table_hit is not None and first_table_hit <= 30,
+        "first_family_hit_rank": first_family_hit,
+        "family_hit_at_5": first_family_hit is not None and first_family_hit <= 5,
+        "family_hit_at_10": first_family_hit is not None and first_family_hit <= 10,
+        "family_hit_at_20": first_family_hit is not None and first_family_hit <= 20,
+        "family_hit_at_30": first_family_hit is not None and first_family_hit <= 30,
+        "family_hit_at_50": first_family_hit is not None and first_family_hit <= 50,
         "first_row_hit_rank": first_row_hit,
         "row_hit_at_10": first_row_hit is not None and first_row_hit <= 10,
         "row_hit_at_20": first_row_hit is not None and first_row_hit <= 20,
         "row_hit_at_30": first_row_hit is not None and first_row_hit <= 30,
         "elapsed_s": round(time.time() - t0, 2),
+        **debug_meta,
     }
 
 
@@ -187,9 +231,30 @@ def main():
     t10 = sum(1 for r in results if r.get("table_hit_at_10"))
     t20 = sum(1 for r in results if r.get("table_hit_at_20"))
     t30 = sum(1 for r in results if r.get("table_hit_at_30"))
+    t50 = sum(1 for r in results if r.get("first_table_hit_rank") is not None and r.get("first_table_hit_rank") <= 50)
+    f5 = sum(1 for r in results if r.get("family_hit_at_5"))
+    f10 = sum(1 for r in results if r.get("family_hit_at_10"))
+    f20 = sum(1 for r in results if r.get("family_hit_at_20"))
+    f30 = sum(1 for r in results if r.get("family_hit_at_30"))
+    f50 = sum(1 for r in results if r.get("first_family_hit_rank") is not None and r.get("first_family_hit_rank") <= 50)
     r10 = sum(1 for r in results if r.get("row_hit_at_10"))
     r20 = sum(1 for r in results if r.get("row_hit_at_20"))
     r30 = sum(1 for r in results if r.get("row_hit_at_30"))
+    avg_pool_before = (
+        sum(float(r.get("pool_before_filters", 0)) for r in results if not r.get("error") and not r.get("skipped")) / n
+        if n
+        else 0.0
+    )
+    avg_pool_after_year = (
+        sum(float(r.get("pool_after_year_filter", 0)) for r in results if not r.get("error") and not r.get("skipped")) / n
+        if n
+        else 0.0
+    )
+    avg_pool_after_structure = (
+        sum(float(r.get("pool_after_structure_filter", 0)) for r in results if not r.get("error") and not r.get("skipped")) / n
+        if n
+        else 0.0
+    )
 
     print(f"\nDone in {time.time() - t0:.1f}s")
     print(f"  n      = {n}")
@@ -201,9 +266,18 @@ def main():
     print(f"  table_hit@10 = {t10}/{n} ({t10 / n * 100:.1f}%)")
     print(f"  table_hit@20 = {t20}/{n} ({t20 / n * 100:.1f}%)")
     print(f"  table_hit@30 = {t30}/{n} ({t30 / n * 100:.1f}%)")
+    print(f"  table_hit@50 = {t50}/{n} ({t50 / n * 100:.1f}%)")
+    print(f"  family_hit@5  = {f5}/{n} ({f5 / n * 100:.1f}%)")
+    print(f"  family_hit@10 = {f10}/{n} ({f10 / n * 100:.1f}%)")
+    print(f"  family_hit@20 = {f20}/{n} ({f20 / n * 100:.1f}%)")
+    print(f"  family_hit@30 = {f30}/{n} ({f30 / n * 100:.1f}%)")
+    print(f"  family_hit@50 = {f50}/{n} ({f50 / n * 100:.1f}%)")
     print(f"  row_hit@10   = {r10}/{n} ({r10 / n * 100:.1f}%)")
     print(f"  row_hit@20   = {r20}/{n} ({r20 / n * 100:.1f}%)")
     print(f"  row_hit@30   = {r30}/{n} ({r30 / n * 100:.1f}%)")
+    print(f"  avg pool before filters = {avg_pool_before:.1f}")
+    print(f"  avg pool after year     = {avg_pool_after_year:.1f}")
+    print(f"  avg pool after structure= {avg_pool_after_structure:.1f}")
 
     args.out.write_text("\n".join(json.dumps(r) for r in sorted(results, key=lambda x: x["uid"])) + "\n")
     print(f"Wrote detailed results to {args.out}")
@@ -219,9 +293,18 @@ def main():
             "table_hit_at_10": round(t10 / n * 100, 1) if n else 0.0,
             "table_hit_at_20": round(t20 / n * 100, 1) if n else 0.0,
             "table_hit_at_30": round(t30 / n * 100, 1) if n else 0.0,
+            "table_hit_at_50": round(t50 / n * 100, 1) if n else 0.0,
+            "family_hit_at_5": round(f5 / n * 100, 1) if n else 0.0,
+            "family_hit_at_10": round(f10 / n * 100, 1) if n else 0.0,
+            "family_hit_at_20": round(f20 / n * 100, 1) if n else 0.0,
+            "family_hit_at_30": round(f30 / n * 100, 1) if n else 0.0,
+            "family_hit_at_50": round(f50 / n * 100, 1) if n else 0.0,
             "row_hit_at_10": round(r10 / n * 100, 1) if n else 0.0,
             "row_hit_at_20": round(r20 / n * 100, 1) if n else 0.0,
             "row_hit_at_30": round(r30 / n * 100, 1) if n else 0.0,
+            "avg_pool_before_filters": round(avg_pool_before, 1),
+            "avg_pool_after_year_filter": round(avg_pool_after_year, 1),
+            "avg_pool_after_structure_filter": round(avg_pool_after_structure, 1),
             "elapsed_s": round(time.time() - t0, 2),
         }
         args.summary_out.write_text(json.dumps(summary, indent=2) + "\n")
