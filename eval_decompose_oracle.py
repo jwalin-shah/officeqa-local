@@ -22,6 +22,7 @@ Buckets per DR:
 A row is "clean" only if every DR is OK (or COHORT).
 """
 
+import argparse
 import json
 import re
 import sqlite3
@@ -230,14 +231,25 @@ def evaluate(records: list[dict]) -> tuple[dict, list]:
     summary = {
         "total_rows": len(records),
         "clean_rows": row_clean,
+        "clean_rows_pct": round(row_clean / len(records) * 100, 1) if records else 0.0,
         "dr_counts": dict(dr_counts),
     }
     return summary, per_row_problems
 
 
 def main():
-    path = Path(sys.argv[1] if len(sys.argv) > 1 else "decompose_eval.full.jsonl")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("path", nargs="?", default="decompose_eval.full.jsonl")
+    ap.add_argument("--uids", type=str, default="")
+    ap.add_argument("--out", type=Path, default=Path("decompose_oracle_problems.jsonl"))
+    ap.add_argument("--summary-out", type=Path, default=None)
+    args = ap.parse_args()
+
+    path = Path(args.path)
     records = [json.loads(line) for line in path.open()]
+    selected = {u.strip() for u in args.uids.split(",") if u.strip()}
+    if selected:
+        records = [r for r in records if r.get("uid") in selected]
     print(f"Oracle-checking {len(records)} decomposed specs from {path}\n")
 
     summary, problems = evaluate(records)
@@ -267,11 +279,13 @@ def main():
                 print(f"    gold_files={p['gold_files']}")
 
     # Dump full problem list for drilldown
-    out_path = "decompose_oracle_problems.jsonl"
-    with open(out_path, "w") as f:
+    with open(args.out, "w") as f:
         for p in problems:
             f.write(json.dumps(p) + "\n")
-    print(f"\nFull problem list → {out_path}")
+    print(f"\nFull problem list → {args.out}")
+    if args.summary_out:
+        args.summary_out.write_text(json.dumps(summary, indent=2) + "\n")
+        print(f"Summary → {args.summary_out}")
 
 
 if __name__ == "__main__":

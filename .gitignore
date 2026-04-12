@@ -54,3 +54,4 @@ files.db-wal
 
 # --- Scratch analysis notes (keep PLAN.md, README.md, docs/) ---
 funnel_analysis.md
+runs/

@@ -35,7 +35,7 @@ uv run python eval_decompose.py          # evaluate decompose phase output
 ```bash
 ./scripts/setup_agents.py                 # initialize agent infrastructure and task specs
 ./scripts/doctor_agents.py                # verify agent setup and diagnose issues
-./scripts/setup_worktrees.sh              # create git worktrees for siloed agent stages
+./scripts/setup_worktrees.sh              # create git worktrees in `.agent-worktrees/` for isolated agent stages
 ./scripts/link_worktree_artifacts.sh      # link ledger.sqlite and cached decompose to worktrees
 ./scripts/refresh_worktrees_from_main.sh  # refresh worktrees from latest main branch
 DRY_RUN=1 ./scripts/agent_iterate.sh     # iterate agent rounds (use DRY_RUN=1 first)
@@ -104,16 +104,26 @@ legacy fallback; prefer the JSON corpus for all new code.
 - `deep_dive_audit.py` — diagnostic audit tool for analyzing system state and performance across the pipeline.
 - `test_solve.py` — validation script.
 - `test_recall_with_decompose.py` — test retrieval recall with pre-cached decompose output.
+- `test_variants.py` — validation script for testing variant configurations and system behavior.
 - `eval_decompose.py` — evaluation utilities for decompose phase output.
+- `eval_decompose_oracle.py` — evaluation utilities for decompose phase output with oracle/gold source files.
 - `eval_retrieve.py` — evaluation utilities for retrieval phase output.
-- `validate_decompose.py` — validation script for decompose phase output.
 - `eval_ledger.py` — evaluation utilities for ledger-based reference.
+- `eval_attribution.py` — evaluation utilities for tracing answer attribution to sources.
+- `eval_suite.py` — coordinated evaluation suite runner for systematic benchmarking across phases.
+- `validate_decompose.py` — validation script for decompose phase output.
 - `batch_test.py` — batch evaluation runner with detailed metrics.
+- `analyze_retrieve_misses.py` — diagnostic script (with `--uids`, `--miss-k`, `--out`, `--summary-out` flags) for bucketing and analyzing retrieval misses by failure mode.
+- `analyze_retrieval_run.py` — diagnostic script for analyzing a single retrieval evaluation run.
+- `compare_eval_runs.py` — comparison tool for analyzing differences across multiple eval runs.
+- `retrieval_cycle.py` — diagnostic script for analyzing retrieval cycle behavior.
 - `build_index.py` — legacy corpus indexing (replaced by ledger approach).
 - `cpi.py` — CPI-U data 1930-2026.
 - `tests/conftest.py` — pytest fixtures for test setup.
 - `tests/test_build_ledger_row_year_propagate.py` — tests for ledger row year propagation logic.
 - `tests/test_extract_quality_retry.py` — tests for extraction quality retry mechanisms.
+- `tests/test_attribution_eval.py` — tests for answer attribution evaluation.
+- `tests/test_retrieval_analysis.py` — tests for retrieval analysis diagnostics.
 - `scripts/setup_agents.py` — initialize agent infrastructure and standardize task specs.
 - `scripts/doctor_agents.py` — diagnostic tool to verify agent configuration and troubleshoot setup issues.
 - `scripts/setup_worktrees.sh` — create git worktrees in `.agent-worktrees/` for isolated agent stages.
@@ -130,6 +140,8 @@ legacy fallback; prefer the JSON corpus for all new code.
 - `officeqa_full.csv` — 246 benchmark questions with gold answers and source files.
 - `decompose_eval.full.jsonl` — cached decompose specs for all 246 questions; used offline for retrieval/extraction testing without live LLM calls.
 - `ledger.sqlite` — SQLite database built from corpus_json/; stores normalized cells, tables, prose, footnotes, and derived views for retrieval.
+- `runs/` — eval run outputs directory (gitignored); stores JSONL and JSON artifacts from systematic evaluation and comparison runs.
+- `.agent-worktrees/` — agent worktree directories created by setup_worktrees.sh (tracked in git; contains isolated stage code and artifacts).
 
 ### Archive
 Historical arena code has been removed from the repo (was `archive_from_arena/`, removed 2026-04-11 as part of repo cleanup). If you need to reference it, `git log --all --full-history -- archive_from_arena/` will find the last commit that contained it.

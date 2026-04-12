@@ -19,10 +19,13 @@ Buckets:
 
 Usage:
   uv run python analyze_retrieve_misses.py
+  uv run python analyze_retrieve_misses.py --uids UID0001,UID0002
+  uv run python analyze_retrieve_misses.py --miss-k 10 --out misses.jsonl --summary-out misses.json
 """
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import re
@@ -49,7 +52,7 @@ SPECS = HERE / "decompose_eval.full.jsonl"
 LEDGER = HERE / "ledger.sqlite"
 URL_PAGE_RE = re.compile(r"[?&]page=(\d+)")
 TOP_K = 50
-MISS_K = 5  # classify anything not in top-K as a miss
+DEFAULT_MISS_K = 5  # classify anything not in top-K as a miss
 
 
 def parse_gold_locs(row: dict) -> list[tuple[str, int]]:
@@ -103,7 +106,18 @@ def row_hint_matches(conn: sqlite3.Connection, table_id: int, row_hints: list[st
     return row is not None
 
 
+def _parse_uids(raw: str) -> set[str]:
+    return {u.strip() for u in raw.split(",") if u.strip()}
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--uids", type=str, default="")
+    ap.add_argument("--miss-k", type=int, default=DEFAULT_MISS_K)
+    ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--summary-out", type=Path, default=None)
+    args = ap.parse_args()
+
     with open(CSV) as f:
         csv_rows = {r["uid"]: r for r in csv.DictReader(f)}
 
@@ -114,6 +128,7 @@ def main():
             specs[d["uid"]] = d
 
     conn = _ledger_conn()
+    selected = _parse_uids(args.uids)
 
     buckets: Counter[str] = Counter()
     examples: dict[str, list[str]] = {
@@ -122,8 +137,11 @@ def main():
     }
     total = 0
     n_hit_at_5 = 0
+    rows_out: list[dict] = []
 
     for uid, d in sorted(specs.items()):
+        if selected and uid not in selected:
+            continue
         csv_row = csv_rows.get(uid)
         if not csv_row:
             continue
@@ -148,7 +166,7 @@ def main():
             (i + 1 for i, r in enumerate(results) if Path(r["file"]).stem in gold_stems),
             None,
         )
-        if first_file_rank and first_file_rank <= MISS_K:
+        if first_file_rank and first_file_rank <= args.miss_k:
             n_hit_at_5 += 1
             continue
 
@@ -177,6 +195,10 @@ def main():
                 f"gold={list(gold_tids)[:3]}  row_match={any_row_match}"
                 f"  top5={[Path(r['file']).stem for r in results[:5]]}"
             )
+            row_ok = any_row_match
+            title_ok = None
+            best_rank = None
+            best_gold_tid = None
         else:
             # In pool. Check the best gold entry's rank and diagnose why.
             best_rank = min(i + 1 for i, tid in enumerate(result_tids) if tid in gold_tids)
@@ -199,14 +221,30 @@ def main():
             )
 
         buckets[bucket] += 1
+        rows_out.append(
+            {
+                "uid": uid,
+                "bucket": bucket,
+                "first_file_rank": first_file_rank,
+                "miss_k": args.miss_k,
+                "gold_table_ids": sorted(gold_tids),
+                "gold_in_result": bool(gold_in_result),
+                "best_gold_rank": best_rank,
+                "best_gold_tid": best_gold_tid,
+                "row_hints": row_hints,
+                "row_ok": row_ok,
+                "title_ok": title_ok,
+                "note": note,
+            }
+        )
         if len(examples[bucket]) < 5:
             examples[bucket].append(f"{uid}  {note}")
 
     print()
     print(f"Total classified: {total}")
-    print(f"@{MISS_K} hits:        {n_hit_at_5}  ({n_hit_at_5 / total * 100:.1f}%)")
+    print(f"@{args.miss_k} hits:        {n_hit_at_5}  ({n_hit_at_5 / total * 100:.1f}%)")
     print(
-        f"@{MISS_K} misses:      {total - n_hit_at_5}  ({(total - n_hit_at_5) / total * 100:.1f}%)"
+        f"@{args.miss_k} misses:      {total - n_hit_at_5}  ({(total - n_hit_at_5) / total * 100:.1f}%)"
     )
     print()
     print("Miss buckets:")
@@ -220,6 +258,20 @@ def main():
         print(f"\n  [{bucket}]")
         for ex in exs:
             print(f"    {ex}")
+
+    if args.out:
+        args.out.write_text("\n".join(json.dumps(r) for r in rows_out) + "\n")
+        print(f"\nWrote detailed miss rows to {args.out}")
+    if args.summary_out:
+        summary = {
+            "total_questions": total,
+            "hit_at_k": n_hit_at_5,
+            "miss_at_k": total - n_hit_at_5,
+            "miss_k": args.miss_k,
+            "buckets": dict(buckets),
+        }
+        args.summary_out.write_text(json.dumps(summary, indent=2) + "\n")
+        print(f"Wrote summary to {args.summary_out}")
 
 
 if __name__ == "__main__":

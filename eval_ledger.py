@@ -28,6 +28,7 @@ Usage:
 
 import argparse
 import csv
+import json
 import re
 import sqlite3
 import sys
@@ -166,7 +167,17 @@ def check_cell_present_on_page(
     return False, None
 
 
-def run(n: int = 0, verbose: bool = False) -> None:
+def _parse_uids(raw: str) -> set[str]:
+    return {u.strip() for u in raw.split(",") if u.strip()}
+
+
+def run(
+    n: int = 0,
+    verbose: bool = False,
+    uids: set[str] | None = None,
+    out: Path | None = None,
+    summary_out: Path | None = None,
+) -> None:
     if not LEDGER_PATH.exists():
         print(f"{LEDGER_PATH} does not exist. Run build_ledger.py first.", file=sys.stderr)
         sys.exit(1)
@@ -175,6 +186,8 @@ def run(n: int = 0, verbose: bool = False) -> None:
 
     with BENCHMARK_PATH.open() as f:
         rows = list(csv.DictReader(f))
+    if uids:
+        rows = [row for row in rows if row.get("uid") in uids]
     if n:
         rows = rows[:n]
 
@@ -197,6 +210,7 @@ def run(n: int = 0, verbose: bool = False) -> None:
     gaps_file: list[tuple[str, str]] = []  # not even reachable@file
     gaps_page: list[tuple[str, str]] = []  # reachable@file but no page hit at all
     gaps_partial: list[tuple[str, str]] = []  # multi-loc with partial coverage
+    detailed: list[dict] = []
 
     for i, row in enumerate(rows, 1):
         total += 1
@@ -271,6 +285,18 @@ def run(n: int = 0, verbose: bool = False) -> None:
                 f"  [{i:3d}] {uid} {mark:4s}  gold={gold_raw[:14]:14s}  "
                 f"file_hits={file_hits:4d}  page_counts={page_counts}  scale={scale_hint}"
             )
+        detailed.append(
+            {
+                "uid": uid,
+                "gold_files": sorted(gold_files),
+                "gold_locations": gold_locations,
+                "reachable_file": file_hits > 0,
+                "reachable_page_all": all_page_hit,
+                "reachable_page_any": any_page_hit,
+                "cell_present_page": cell_hit,
+                "page_counts": page_counts,
+            }
+        )
 
     conn.close()
 
@@ -318,10 +344,40 @@ def run(n: int = 0, verbose: bool = False) -> None:
     for uid, info in gaps_partial[:10]:
         print(f"  {uid}: {info}")
 
+    if out:
+        out.write_text("\n".join(json.dumps(row) for row in detailed) + "\n")
+        print(f"\nWrote detailed results to {out}")
+
+    if summary_out:
+        summary = {
+            "total_questions": total,
+            "reachability_file": round(reachable_file / total * 100, 1) if total else 0.0,
+            "reachability_page": (
+                round(reachable_page_all / total * 100, 1) if total else 0.0
+            ),
+            "reachability_page_any": (
+                round(reachable_page_any / total * 100, 1) if total else 0.0
+            ),
+            "cell_present_page_numeric_pct": (
+                round(cell_present_page / parsed_gold * 100, 1) if parsed_gold else 0.0
+            ),
+        }
+        summary_out.write_text(json.dumps(summary, indent=2) + "\n")
+        print(f"Wrote summary to {summary_out}")
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=0)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--uids", type=str, default="")
+    ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--summary-out", type=Path, default=None)
     args = ap.parse_args()
-    run(n=args.n, verbose=args.verbose)
+    run(
+        n=args.n,
+        verbose=args.verbose,
+        uids=_parse_uids(args.uids),
+        out=args.out,
+        summary_out=args.summary_out,
+    )
