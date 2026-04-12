@@ -212,20 +212,19 @@ FTS_SYNONYM_THRESHOLD = 5
 METRIC_SYNONYM_THRESHOLD = 5
 
 # Progressive-stage bonuses: trace metadata already records which stage first
-# retrieved each table; nudging the reranker rewards higher-confidence paths
-# without dominating FTS+metric norms (which cap around 1.0).
+# retrieved each table; nudging the reranker rewards higher-confidence paths.
 _FTS_STRATEGY_BONUS: dict[str, float] = {
-    "exact_year_filter": 0.06,
-    "exact_year_window": 0.04,
-    "synonym_year_window": 0.03,
-    "synonym_unrestricted": 0.02,
-    "year_shifted": 0.01,
-    "exact_unrestricted": 0.02,
+    "exact_year_filter": 0.60,
+    "exact_year_window": 0.40,
+    "synonym_year_window": 0.30,
+    "synonym_unrestricted": 0.20,
+    "year_shifted": 0.10,
+    "exact_unrestricted": 0.20,
 }
 _METRIC_STRATEGY_BONUS: dict[str, float] = {
-    "primary_exact": 0.08,
-    "synonym_exact": 0.05,
-    "partial_match": 0.02,
+    "primary_exact": 0.80,
+    "synonym_exact": 0.50,
+    "partial_match": 0.20,
 }
 
 
@@ -1439,9 +1438,9 @@ def retrieve(
         if max_best_row_cells > 0 and matching_rows > 0:
             # Reward the table whose best matching row has the most
             # non-null cells — that's the one most likely to supply a
-            # full monthly or multi-year series. Peak 1.2 so it can
-            # outrank FTS+metric (max 1.0) but not steamroll everything.
-            s += 1.2 * (best_row_cells / max_best_row_cells)
+            # full monthly or multi-year series. Peak 5.0 so it strongly
+            # outweighs minor FTS+metric differences.
+            s += 5.0 * (best_row_cells / max_best_row_cells)
             # Penalize row-label ambiguity: if the hint matches many
             # rows, the DR is harder to pin down in this table. Small
             # penalty, grows slowly.
