@@ -21,13 +21,14 @@ import os
 import re
 import sqlite3
 import threading
-from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
 from rapidfuzz import fuzz, process
 
-LEDGER_PATH = Path(__file__).parent / "ledger.sqlite"
+from ledger_paths import get_ledger_sqlite_path
+
+LEDGER_PATH = get_ledger_sqlite_path()
 
 load_dotenv()
 

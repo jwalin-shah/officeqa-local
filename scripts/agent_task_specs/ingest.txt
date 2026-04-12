@@ -1,5 +1,7 @@
 GOAL: Improve ingestion integrity in build_ledger.py (losslessness, flags, migrations) with a focused change set.
 
+READ FIRST: AGENTS.md at the repo root. Follow its Traversal Policy.
+
 IN SCOPE: build_ledger.py, migrate_*.py, tests/test_ledger.py
 
 OUT OF SCOPE: retrieve_v2.py, extract.py, solve.py

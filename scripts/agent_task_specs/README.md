@@ -21,8 +21,8 @@ Each worktree is on branch **`agent/<stream>`** branched from `main`.
 
 1. **File → Open Folder…** → choose the **worktree directory** in the table below (not the main monorepo, unless you want one agent in main).
 2. Start **Agent** (or Composer) in that window.
-3. **Attach** the spec file (`@` → pick `retrieval.txt`, etc.) **or** paste the full contents of that file into the first message.
-4. Add one line: *“Follow the spec only; do not touch OUT OF SCOPE files.”*
+3. **Attach** [AGENTS.md](../../AGENTS.md) first, then attach the spec file (`@` → pick `retrieval.txt`, etc.), **or** paste both into the first message.
+4. Add one line: *“Read AGENTS.md first. Follow the spec only; do not touch OUT OF SCOPE files.”*
 
 Shared data (symlinks from `link_worktree_artifacts.sh`): `ledger.sqlite`, `corpus_json/` when present on the main clone.
 

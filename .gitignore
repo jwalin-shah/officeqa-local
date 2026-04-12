@@ -38,6 +38,10 @@ corpus_index.pkl
 *.sqlite-shm
 *.sqlite-wal
 *.sqlite.bak
+# Rebuild script snapshots / in-progress builds (not *.sqlite suffix)
+ledger.sqlite.prev.*
+ledger.build.*.sqlite
+build_ledger.*.pid
 files.db
 files.db-shm
 files.db-wal

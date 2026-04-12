@@ -29,6 +29,8 @@ Usage:
   uv run python build_ledger.py --limit 10        # sanity check on 10 files
   uv run python build_ledger.py                   # full build
   uv run python build_ledger.py --rebuild         # drop and rebuild
+  uv run python build_ledger.py --rebuild --output ledger.next.sqlite
+      # build to a side file; swap into place when done (keeps old DB for agents)
 """
 
 import argparse
@@ -2201,7 +2203,7 @@ def run_sanity_checks(conn: sqlite3.Connection) -> None:
 # ── Build driver ─────────────────────────────────────────────────────────────
 
 
-def build(limit: int = 0, rebuild: bool = False) -> None:
+def build(limit: int = 0, rebuild: bool = False, ledger_path: Path | None = None) -> None:
     files = sorted(CORPUS_JSON.glob("treasury_bulletin_*.json"))
     if not files:
         print(f"No files in {CORPUS_JSON}", file=sys.stderr)
@@ -2209,11 +2211,13 @@ def build(limit: int = 0, rebuild: bool = False) -> None:
     if limit:
         files = files[:limit]
 
+    out = ledger_path if ledger_path is not None else LEDGER_PATH
+
     print(f"Building ledger from {len(files)} files...")
-    print(f"  schema: {LEDGER_PATH}")
+    print(f"  schema: {out}")
     print(f"  rebuild: {rebuild}\n")
 
-    conn = init_db(LEDGER_PATH, rebuild=rebuild)
+    conn = init_db(out, rebuild=rebuild)
 
     totals: dict = {}
     t0 = time.time()
@@ -2252,8 +2256,8 @@ def build(limit: int = 0, rebuild: bool = False) -> None:
     run_sanity_checks(conn)
     conn.close()
 
-    size_mb = LEDGER_PATH.stat().st_size / (1024 * 1024)
-    print(f"Wrote {LEDGER_PATH} ({size_mb:.1f} MB)")
+    size_mb = out.stat().st_size / (1024 * 1024)
+    print(f"Wrote {out} ({size_mb:.1f} MB)")
 
 
 if __name__ == "__main__":
@@ -2262,5 +2266,15 @@ if __name__ == "__main__":
     ap.add_argument(
         "--rebuild", action="store_true", help="drop and recreate the ledger before ingesting"
     )
+    ap.add_argument(
+        "--output",
+        type=Path,
+        default=LEDGER_PATH,
+        metavar="PATH",
+        help="SQLite output path (default: ledger.sqlite in cwd)",
+    )
     args = ap.parse_args()
-    build(limit=args.limit, rebuild=args.rebuild)
+    out = args.output
+    if not out.is_absolute():
+        out = (Path(__file__).resolve().parent / out).resolve()
+    build(limit=args.limit, rebuild=args.rebuild, ledger_path=out)

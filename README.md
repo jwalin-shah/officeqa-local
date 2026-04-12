@@ -57,6 +57,13 @@ Run tests:
 uv run pytest
 ```
 
+Check shared agent wiring:
+
+```bash
+UV_CACHE_DIR=/tmp/uv-officeqa uv run python -m scripts.doctor_agents
+UV_CACHE_DIR=/tmp/uv-officeqa uv run python -m scripts.setup_agents
+```
+
 Run selected eval flows:
 
 ```bash

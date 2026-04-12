@@ -1,5 +1,7 @@
 GOAL: Improve extraction robustness (rendering, retries, ledger checks) in extract.py.
 
+READ FIRST: AGENTS.md at the repo root. Follow its Traversal Policy.
+
 IN SCOPE: extract.py, tests/test_extraction.py
 
 OUT OF SCOPE: retrieve_v2.py, compute.py, verify.py (unless a one-line contract fix is unavoidable)

@@ -13,7 +13,6 @@ import os
 import sqlite3
 import sys
 import threading
-from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -22,6 +21,7 @@ from compute import ComputeError, format_result, parse_unit, validate_extraction
 from compute import execute as compute_execute
 from extract import extract_structured
 from find import fetch_vocabulary, resolve_cells, retrieve_bottomup, search_cells_bottomup
+from ledger_paths import get_ledger_sqlite_path
 from retrieve_v2 import retrieve as retrieve_v2
 from scout import scout
 from verify import verify_answer
@@ -47,7 +47,7 @@ MAX_LLM_CALLS = 6
 
 # ── Ledger connection for deterministic fast-path ───────────────────────────
 
-_LEDGER_PATH = Path(__file__).parent / "ledger.sqlite"
+_LEDGER_PATH = get_ledger_sqlite_path()
 _FP_TLS = threading.local()
 
 
@@ -713,6 +713,7 @@ OUTPUT — return ONLY this JSON schema, no prose
       "source": "corpus|cpi|fx|external",
       "row_hint": "<exact row label from the corpus>",
       "column_hint": "<column header or year>",
+      "section_hint": "<section header or table title to disambiguate, e.g. 'Budget' vs 'Criminal Cases'>",
       "years": [1940],
       "granularity": "annual|monthly_all|monthly_range|continuous_monthly|multi_year_annual|specific_month",
       "start_year": null,
@@ -904,7 +905,7 @@ def retrieve_for_spec(
     spec: dict,
     question: str,
     verbose: bool = False,
-    top_k_per_dr: int = 10,
+    top_k_per_dr: int = 20,
     max_per_file: int = 3,
 ) -> dict:
     """Per-DR retrieval against the table-level index.
@@ -1428,12 +1429,16 @@ if __name__ == "__main__":
         eval_args = [a for a in args if a != "--eval"]
 
         n = 0
+        offset = 0
         parallel = 10
         oracle = "--oracle" in eval_args
         for i, a in enumerate(eval_args):
             if a == "--n" and i + 1 < len(eval_args):
                 with contextlib.suppress(ValueError):
                     n = int(eval_args[i + 1])
+            if a == "--offset" and i + 1 < len(eval_args):
+                with contextlib.suppress(ValueError):
+                    offset = int(eval_args[i + 1])
             if a == "--parallel" and i + 1 < len(eval_args):
                 with contextlib.suppress(ValueError):
                     parallel = int(eval_args[i + 1])
@@ -1442,6 +1447,9 @@ if __name__ == "__main__":
         with open("officeqa_full.csv") as f:
             for row in csv.DictReader(f):
                 rows.append(row)
+
+        if offset:
+            rows = rows[offset:]
         if n:
             rows = rows[:n]
 

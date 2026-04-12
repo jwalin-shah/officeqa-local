@@ -17,6 +17,10 @@ dependencies = [
     "scipy>=1.17.1",
 ]
 
+[project.scripts]
+officeqa-agent-doctor = "scripts.doctor_agents:main"
+officeqa-agent-setup = "scripts.setup_agents:main"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

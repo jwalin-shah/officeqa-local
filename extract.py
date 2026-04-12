@@ -413,6 +413,8 @@ def render_entry(entry: dict, vertical_threshold: int = 8, max_rows: int = 80) -
     section = (entry.get("section") or "").strip()
     title = (entry.get("title") or "").strip()
     caption = (entry.get("caption") or "").strip()
+    unit = (entry.get("unit") or "").strip()
+    near_content = entry.get("near_content") or []
     element_id = entry.get("element_id")
     page_id = entry.get("page_id")
 
@@ -427,6 +429,11 @@ def render_entry(entry: dict, vertical_threshold: int = 8, max_rows: int = 80) -
         header_bits.append(f"Section: {section}")
     if caption:
         header_bits.append(f"Caption: {caption}")
+    if unit:
+        header_bits.append(f"Unit Metadata: {unit}")
+    for content in near_content:
+        if content:
+            header_bits.append(f"Adjacent Context: {content.strip()}")
 
     # Prose/footnote entries carry text in "content", not HTML tables
     content = (entry.get("content") or "").strip()
@@ -562,30 +569,33 @@ def is_separator(line: str) -> bool:
 class TableSection:
     """A section within a table block: section label + data rows."""
 
-    def __init__(self, label: str, header_line: str, data_lines: list[str], file_line_start: int):
+    def __init__(
+        self,
+        label: str,
+        header_line: str,
+        data_lines: list[str],
+        file_line_start: int,
+        context_above: list[str] = None,
+    ):
         self.label = label
         self.header_line = header_line
         self.data_lines = data_lines
         self.file_line_start = file_line_start
+        self.context_above = context_above or []
         # Parse header columns
         self.headers = [parse_header(h) for h in split_row(header_line)]
 
     def raw_text(self) -> str:
-        """Return header + data as raw text for the LLM."""
-        return self.header_line + "\n" + "\n".join(self.data_lines)
-
-    def get_cell(self, row_idx: int, col_name: str) -> str | None:
-        """Get a cell value by row index and column name."""
-        if row_idx >= len(self.data_lines):
-            return None
-        cells = split_row(self.data_lines[row_idx])
-        for i, h in enumerate(self.headers):
-            if h == col_name and i < len(cells):
-                return cells[i]
-        return None
+        """Return context + header + data as raw text for the LLM."""
+        prefix = ""
+        if self.context_above:
+            prefix = "Context: " + " | ".join(self.context_above) + "\n"
+        return prefix + self.header_line + "\n" + "\n".join(self.data_lines)
 
 
-def parse_table_sections(lines: list[str], block_start: int) -> list[TableSection]:
+def parse_table_sections(
+    lines: list[str], block_start: int, context_above: list[str] = None
+) -> list[TableSection]:
     """Parse a table block into sections.
 
     A section starts with a 'section header' row (label + nan cells)
@@ -618,7 +628,9 @@ def parse_table_sections(lines: list[str], block_start: int) -> list[TableSectio
             # Save previous section if it has data
             if current_data:
                 sections.append(
-                    TableSection(current_label, header_line, current_data, current_start)
+                    TableSection(
+                        current_label, header_line, current_data, current_start, context_above
+                    )
                 )
             current_label = cells[0].strip()
             current_data = []
@@ -628,13 +640,17 @@ def parse_table_sections(lines: list[str], block_start: int) -> list[TableSectio
 
     # Save last section
     if current_data:
-        sections.append(TableSection(current_label, header_line, current_data, current_start))
+        sections.append(
+            TableSection(current_label, header_line, current_data, current_start, context_above)
+        )
 
     # If no section headers found, treat entire block as one section
     if not sections and data_start < len(lines):
         all_data = [ln for ln in lines[data_start:] if "|" in ln and not is_separator(ln)]
         if all_data:
-            sections.append(TableSection("", header_line, all_data, block_start + data_start))
+            sections.append(
+                TableSection("", header_line, all_data, block_start + data_start, context_above)
+            )
 
     return sections
 
@@ -895,8 +911,12 @@ def build_context(
 
         blocks = find_table_blocks(file_lines)
         for block_start, block_end in blocks:
+            # Grab up to 5 lines of text above the table block for context (e.g. units)
+            ctx_start = max(0, block_start - 5)
+            context_above = [ln.strip() for ln in file_lines[ctx_start:block_start] if ln.strip()]
+
             block_lines = file_lines[block_start:block_end]
-            sections = parse_table_sections(block_lines, block_start)
+            sections = parse_table_sections(block_lines, block_start, context_above)
             for section in sections:
                 s = score_section(section, keywords, years)
                 if s > 0:
@@ -920,6 +940,8 @@ def build_context(
         if section.label:
             part += f" — section: {section.label}"
         part += "\n"
+        if section.context_above:
+            part += "Context: " + " | ".join(section.context_above) + "\n"
         if include_header:
             part += section.header_line + "\n"
         part += "\n".join(section.data_lines)
@@ -990,7 +1012,16 @@ def get_cpi_context(question: str) -> str:
 EXTRACT_SYSTEM = """You extract answers from U.S. Treasury Bulletin data tables.
 
 You receive pre-selected table sections that are most likely to contain the answer.
-Each section has a header row (column names) and data rows.
+Each section has a header row (column names), data rows, and sometimes a "Context:"
+line containing text found immediately above the table.
+
+UNITS AND SCALE (CRITICAL):
+- Check the "Context:" line and table headers for scale indicators like
+  "In millions of dollars", "(In thousands of dollars)", "In billions", or "percent".
+- If the question asks for a value in a specific unit (e.g. "in millions") but
+  the table is in a different unit, you MUST perform the conversion.
+- If no unit is explicitly stated in the context or headers, assume nominal
+  dollars as printed.
 
 TABLE FORMAT:
 - Pipe-delimited: | row_label | value1 | value2 | ...
@@ -1053,9 +1084,14 @@ CRITICAL RULE: You DO NOT compute anything. You only extract raw numbers from
 tables and cite where they came from. Python will run the computation later.
 
 EXTRACTION CHECKLIST (these are the failure modes we paid to find):
-  - UNITS: note the table's scale ("in millions", "in thousands") in `notes`
-    if it isn't the obvious default. Return the RAW number as printed — the
-    formatter handles unit conversion. Do not pre-scale.
+  - UNITS AND SCALE (CRITICAL): Scan "Unit Metadata", "Adjacent Context",
+    table title, and captions for unit markers (e.g., "In millions of dollars",
+    "(In thousands of dollars)", "In billions", or "percent").
+    "Adjacent Context" contains prose/footnotes from the same page and
+    frequently carries these critical scale markers.
+    A correct `source_unit` is mandatory for downstream math to work.
+    Return the RAW number as printed in the table — the formatter handles
+    unit conversion. Do not pre-scale.
   - FISCAL YEAR BOUNDARIES. The spec's granularity tells you whether the
     answer is an annual/FY row or a sum of 12 monthly rows, but when you're
     confirming you grabbed the right row remember:
@@ -1514,10 +1550,10 @@ def extract_structured(
             corpus_drs.append(dr)
 
     per_request_context: list[str] = []
-    # Top-k retrieval returns 10 entries per DR. With dedupe_by_file we care
-    # about seeing rank 9-10 as often as rank 1, so the budget has to be wide
+    # Top-k retrieval returns 20 entries per DR. With dedupe_by_file we care
+    # about seeing rank 19-20 as often as rank 1, so the budget has to be wide
     # enough to fit the full list even when each table has a lot of rows.
-    per_request_budget = max(6000, 24000 // max(1, len(data_requests)))
+    per_request_budget = max(6000, 48000 // max(1, len(data_requests)))
 
     any_hit = False
     for dr in corpus_drs:
@@ -1526,31 +1562,47 @@ def extract_structured(
         dr_years = [y for y in (dr.get("years") or [])]
         granularity = dr.get("granularity", "?")
         entries = per_dr_entries.get(dr_id) or []
-        # Reorder entries so tables relevant to this DR's years come first.
+        # Reorder entries so tables relevant to this DR's years and section come first.
         # Matters when multiple DRs share an entry pool (e.g. oracle eval or
         # multi-year questions) — the wrong table otherwise wins the char
         # budget race and the right one gets truncated, leaving the LLM to
         # return nulls because "the 1953 data wasn't in the context".
-        if dr_years and entries:
+        section_hint = (dr.get("section_hint") or "").lower()
+        if (dr_years or section_hint) and entries:
             dr_year_set = {int(y) for y in dr_years}
 
-            def _year_match_score(e: dict) -> tuple[int, int]:
+            def _entry_match_score(sec: str, years: set[int], e: dict) -> tuple[int, int, int]:
+                # 1. Section/Title match (highest priority)
+                section_score = 0
+                if sec:
+                    e_title = (e.get("title") or "").lower()
+                    e_section = (e.get("section") or "").lower()
+                    if sec in e_title or sec in e_section:
+                        section_score = -1
+
+                # 2. Year overlap
                 file_year = e.get("file_year")
                 if file_year is None:
                     file_year = 0
                 e_years = set(e.get("years") or [])
-                # Prefer tables whose row/column years overlap the DR's years;
-                # fall back to file_year proximity. Lower score = earlier.
-                overlap = len(dr_year_set & e_years)  # noqa: B023
-                if overlap:
-                    return (0, -overlap)
+                overlap = len(years & e_years)
+                overlap_score = -overlap if overlap else 0
+
+                # 3. Proximity to DR years
                 proximity = min(
-                    (abs(int(file_year) - y) for y in dr_year_set),  # noqa: B023
+                    (abs(int(file_year) - y) for y in years),
                     default=9999,
                 )
-                return (1, proximity)
+                return (
+                    section_score,
+                    0 if overlap else 1,
+                    proximity if not overlap else overlap_score,
+                )
 
-            entries = sorted(entries, key=_year_match_score)
+            entries = sorted(
+                entries,
+                key=lambda e, _sh=section_hint, _ys=dr_year_set: _entry_match_score(_sh, _ys, e),
+            )
             # For multi-year DRs, promote one entry per uncovered year to
             # the front so the char budget is spread across all years.
             if len(dr_year_set) > 1:

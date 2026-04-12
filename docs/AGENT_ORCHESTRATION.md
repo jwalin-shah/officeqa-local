@@ -9,6 +9,22 @@ headless mode inside isolated git worktrees.
 - Use each tool for what it's best at.
 - One human (you) is the merger/reviewer.
 
+## Shared Traversal Policy
+
+Before doing repo exploration, every agent should read [AGENTS.md](../AGENTS.md)
+and follow its traversal rules.
+
+Default policy:
+- `llm-tldr` first for structure, code context, call graphs, and impact analysis
+- `rtk` first for compact reads, grep, diff, pytest, and command output
+- raw shell tools only when exact unfiltered output is necessary
+
+Human rule: when you launch Claude, Gemini, or Cursor, include:
+
+```text
+Read AGENTS.md first and follow its Traversal Policy.
+```
+
 ## Role assignment
 
 | Agent              | Strengths                                   | Use for                                              |
@@ -151,6 +167,8 @@ claude -p "$(cat <<'EOF'
 Goal: improve oracle extraction accuracy in extract.py without touching
 retrieval or compute.
 
+Read AGENTS.md first and follow its Traversal Policy.
+
 In scope: extract.py, tests/test_extraction.py
 Out of scope: everything else — do not modify.
 
@@ -179,7 +197,8 @@ Key flags:
 ```bash
 cd ~/projects/officeqa-wt/retrieval
 codex exec --sandbox workspace-write --full-auto \
-  "Improve retrieval reranking for summary tables in retrieve_v2.py. \
+  "Read AGENTS.md first and follow its Traversal Policy. \
+   Improve retrieval reranking for summary tables in retrieve_v2.py. \
    Do not touch extract.py or solve.py. \
    Run: uv run pytest tests/test_retrieval.py and uv run python eval_retrieve.py \
    Acceptance: recall@10 improves on retrieve_eval fixtures, no test regressions."
@@ -201,6 +220,7 @@ Used as independent reviewer. Read-only workflow by default.
 ```bash
 cd ~/projects/officeqa-wt/retrieval
 gemini --yolo -p "$(cat <<'EOF'
+Read AGENTS.md first and follow its Traversal Policy.
 You are a code reviewer. Read retrieve_v2.py and the diff on this branch vs
 main. Focus only on reranking logic. List concrete risks, regressions, and
 a single prioritized fix list. Do not modify files.
@@ -224,7 +244,8 @@ Manual equivalent:
 ```bash
 cd ~/projects/officeqa-wt/fastpath
 cursor-agent --workspace "$(pwd)" -p --force --trust -- \
-  "Formalize the deterministic fast-path: extract the fast-path block from \
+  "Read AGENTS.md first and follow its Traversal Policy. \
+   Formalize the deterministic fast-path: extract the fast-path block from \
    solve.py into fast_path.py with a resolve_all(data_requests) entry point. \
    Do not change behavior. Run: uv run pytest tests/ -x"
 ```

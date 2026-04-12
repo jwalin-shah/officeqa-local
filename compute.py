@@ -710,6 +710,8 @@ def execute(spec: dict, extractions: dict, verbose: bool = False):
         "sum": sum,
         "len": len,
         "range": range,
+        "all": all,
+        "any": any,
         "list": list,
         "tuple": tuple,
         "dict": dict,

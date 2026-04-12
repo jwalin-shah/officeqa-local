@@ -29,11 +29,13 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from ledger_paths import get_ledger_sqlite_path
+
 _reconfigure_stdout = getattr(sys.stdout, "reconfigure", None)
 if callable(_reconfigure_stdout):
     _reconfigure_stdout(line_buffering=True)
 
-LEDGER_PATH = Path("ledger.sqlite")
+LEDGER_PATH = get_ledger_sqlite_path()
 
 STOPWORDS = {
     "the",
@@ -1490,6 +1492,18 @@ def retrieve(
         best_channel = "fts" if fts_weighted >= metric_weighted else "metric"
         probe_rows, probe_cells = probe_stats.get(row_id, (0, 0))
 
+        # Fetch adjacent prose/footnotes for unit/context metadata
+        # Broadened: include all prose/footnotes on the same page to catch
+        # distant unit markers (e.g. in section headers or page headers).
+        near_prose = conn.execute(
+            "SELECT content FROM prose WHERE file = ? AND page_id = ?",
+            (file, r["page_id"]),
+        ).fetchall()
+        near_footnotes = conn.execute(
+            "SELECT content FROM footnotes WHERE file = ? AND page_id = ?",
+            (file, r["page_id"]),
+        ).fetchall()
+
         entry = {
             "probe_matched_rows": int(probe_rows),
             "probe_best_cells": int(probe_cells),
@@ -1502,6 +1516,7 @@ def retrieve(
             "section": r["section"] or "",
             "title": r["title"] or "",
             "caption": r["caption"] or "",
+            "near_content": [p[0] for p in near_prose] + [f[0] for f in near_footnotes],
             "column_headers": [c[0] or "" for c in cols],
             "row_labels": [lab[0] or "" for lab in labels],
             "years": years,

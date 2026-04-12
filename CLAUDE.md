@@ -2,10 +2,20 @@
 
 Answer U.S. Treasury Bulletin questions from a 697-file text corpus, targeting >75% accuracy on the 246-question OfficeQA benchmark.
 
+## Shared Agent Rules
+
+All coding agents on this repo should read [AGENTS.md](AGENTS.md) first.
+
+Traversal defaults:
+- use `llm-tldr` for structure, symbol search, call graphs, and context gathering
+- use `rtk` for compact file reads, trees, grep, diff, pytest, and error output
+- fall back to raw `rg`, `sed`, `git`, `sqlite3`, or Python only when exact output is required
+
 ## Run it
 ```bash
 uv run python solve.py "What were the total expenditures for national defense in 1940?"
 uv run python solve.py --eval --n 10     # evaluate first 10 questions
+uv run python solve.py --eval --n 10 --offset 50  # evaluate questions 50-59 (resume/parallel)
 uv run python solve.py --eval --oracle   # evaluate with gold source files
 uv run python solve.py --eval            # full 246-question benchmark
 uv run python batch_test.py               # batch evaluation with detailed metrics
@@ -23,11 +33,14 @@ uv run python eval_decompose.py          # evaluate decompose phase output
 
 **Local agent worktrees:**
 ```bash
+./scripts/setup_agents.py                 # initialize agent infrastructure and task specs
+./scripts/doctor_agents.py                # verify agent setup and diagnose issues
 ./scripts/setup_worktrees.sh              # create git worktrees for siloed agent stages
 ./scripts/link_worktree_artifacts.sh      # link ledger.sqlite and cached decompose to worktrees
 ./scripts/refresh_worktrees_from_main.sh  # refresh worktrees from latest main branch
 DRY_RUN=1 ./scripts/agent_iterate.sh     # iterate agent rounds (use DRY_RUN=1 first)
 OFFICEQA_WT_ROOT="$PWD/.agent-worktrees" ./scripts/cursor_agent_once.sh retrieval  # run Cursor Agent on a stage
+./scripts/rebuild_ledger_background.sh   # rebuild ledger asynchronously in background
 ```
 
 ## Architecture
@@ -75,9 +88,10 @@ so column headers and row labels fall out of an HTML parse. Originals were copie
 legacy fallback; prefer the JSON corpus for all new code.
 
 ### File reference
-- `solve.py` — entry point (orchestrates scout → decompose → retrieve → extract → compute → verify pipeline via OpenAI client with DeepSeek). Implements deterministic fast-path: before LLM extraction, attempts to resolve all data_requests directly via `resolve_cells()` from find.py; if successful, skips LLM entirely.
+- `solve.py` — entry point (orchestrates scout → decompose → retrieve → extract → compute → verify pipeline via OpenAI client with DeepSeek). Implements deterministic fast-path: before LLM extraction, attempts to resolve all data_requests directly via `resolve_cells()` from find.py; if successful, skips LLM entirely. Supports `--eval [--n N] [--offset OFFSET] [--oracle] [--parallel P]` for batch evaluation.
 - `scout.py` — initial analysis/scouting of the question and corpus.
 - `build_ledger.py` — builds ledger.sqlite from corpus_json/ with cell normalization, deduplication, and views for fact retrieval. Table header parsing uses only contiguous header rows from the top (stops at first non-header row) to avoid joining sub-section headers into column paths. Mid-table `<th>` rows (embedded section headers) are kept as data rows, not silently dropped. Handles Type-B rolling-series tables (e.g., "March 1979 through February 1980") via title date-range parsing to infer year_extracted for month-only columns.
+- `ledger_paths.py` — utility for managing ledger database file paths across different environments and configurations.
 - `migrate_metrics_to_view.py` — utility for migrating ledger data.
 - `retrieve.py` — retrieval interface.
 - `retrieve_v2.py` — table-level retrieval implementation (three-channel FTS + metric + prose/footnote funnel with progressive synonym expansion, period-aware reranking scaled to gentle tiebreaker strength, and strategy-weighted ranking). Includes thread-safe caching with bounded retry loops (MAX_LLM_CALLS=6).
@@ -87,6 +101,7 @@ legacy fallback; prefer the JSON corpus for all new code.
 - `verify.py` — post-compute answer verification with deterministic auto-fixes for units and fiscal/calendar year disambiguation.
 - `reward.py` — benchmark scoring.
 - `find.py` — deterministic cell lookup by row/col labels; implements `resolve_cells()` for direct ledger queries. Wired into solve.py as the deterministic fast-path before LLM extraction.
+- `deep_dive_audit.py` — diagnostic audit tool for analyzing system state and performance across the pipeline.
 - `test_solve.py` — validation script.
 - `test_recall_with_decompose.py` — test retrieval recall with pre-cached decompose output.
 - `eval_decompose.py` — evaluation utilities for decompose phase output.
@@ -99,12 +114,17 @@ legacy fallback; prefer the JSON corpus for all new code.
 - `tests/conftest.py` — pytest fixtures for test setup.
 - `tests/test_build_ledger_row_year_propagate.py` — tests for ledger row year propagation logic.
 - `tests/test_extract_quality_retry.py` — tests for extraction quality retry mechanisms.
+- `scripts/setup_agents.py` — initialize agent infrastructure and standardize task specs.
+- `scripts/doctor_agents.py` — diagnostic tool to verify agent configuration and troubleshoot setup issues.
 - `scripts/setup_worktrees.sh` — create git worktrees in `.agent-worktrees/` for isolated agent stages.
 - `scripts/link_worktree_artifacts.sh` — symlink ledger.sqlite and decompose specs to worktrees.
 - `scripts/refresh_worktrees_from_main.sh` — refresh existing worktrees with latest code from main branch.
 - `scripts/agent_iterate.sh` — drive iterative agent rounds across worktrees (supports DRY_RUN=1).
+- `scripts/agent_task_specs/` — task specifications (decompose.txt, eval.txt, extract.txt, fastpath.txt, ingest.txt, retrieval.txt) for siloed agent stages; used by agent invocation harness.
 - `scripts/cursor_agent_once.sh` — invoke Cursor Agent on a single stage.
+- `scripts/rebuild_ledger_background.sh` — background script for rebuilding ledger.sqlite asynchronously without blocking main workflow.
 - `scripts/_invoke_agent.py` — agent invocation helper.
+- `AGENTS.md` — agent architecture and rules for coordinating LLM agents across siloed stages.
 - `corpus_json/` — 697 parsed bulletin JSONs (primary corpus, gitignored).
 - `corpus/` — 697 `.txt` OCR fallback (legacy).
 - `officeqa_full.csv` — 246 benchmark questions with gold answers and source files.

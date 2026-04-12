@@ -1,5 +1,7 @@
 GOAL: Improve ledger retrieval quality or metrics in retrieve_v2.py without widening scope.
 
+READ FIRST: AGENTS.md at the repo root. Follow its Traversal Policy.
+
 IN SCOPE: retrieve_v2.py, retrieve.py, tests/test_retrieval.py
 
 OUT OF SCOPE: solve.py, extract.py, find.py, build_ledger.py, compute.py, verify.py. No new LLM calls in retrieval hot paths.

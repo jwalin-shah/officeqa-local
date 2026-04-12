@@ -1,5 +1,7 @@
 GOAL: Harden eval harnesses (retrieval / ledger / batch metrics) for reproducible gates.
 
+READ FIRST: AGENTS.md at the repo root. Follow its Traversal Policy.
+
 IN SCOPE: eval_*.py, batch_test.py, tests tied to eval fixtures (e.g. tests/test_baseline_metrics.py)
 
 OUT OF SCOPE: retrieve_v2.py, extract.py, solve.py (read-only unless fixing a shared constant)
