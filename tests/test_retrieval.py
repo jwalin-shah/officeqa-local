@@ -225,8 +225,8 @@ def test_candidate_compatibility_combines_year_month_and_row_probe():
 
     class FakeConn:
         def execute(self, sql, params):
-            if "SELECT DISTINCT table_id" in sql and "year IN" in sql:
-                return FakeResult([(101,)])
+            if "year_extracted" in sql and "year IN" in sql:
+                return FakeResult([(101, 1940)])
             if "SELECT DISTINCT table_id" in sql and "month IS NOT NULL" in sql:
                 return FakeResult([(101,), (202,)])
             if "FROM table_rows r" in sql and "r.metric_slug LIKE ?" in sql:
@@ -260,7 +260,7 @@ def test_candidate_compatibility_detects_column_matches():
 
     class FakeConn:
         def execute(self, sql, params):
-            if "SELECT DISTINCT table_id" in sql and "year IN" in sql:
+            if "year_extracted" in sql and "year IN" in sql:
                 return FakeResult([])
             if "SELECT DISTINCT table_id" in sql and "month IS NOT NULL" in sql:
                 return FakeResult([(10,)])
@@ -383,22 +383,21 @@ def test_fts_channel_trace_runs_full_progressive_cascade():
             file_year_between = "t.file_year BETWEEN ? AND ?" in sql
             year_filter = "table_columns" in sql
             query = params[0]
-            if (
-                file_year_between
-                and not year_filter
-                and ("outlays" in query or "military" in query)
-            ):
-                strategy = "synonym_year_window"
-            elif not file_year_between and ("outlays" in query or "military" in query):
-                strategy = "synonym_unrestricted"
-            elif file_year_between and year_filter and params[1:3] == [1945, 1950]:
+            is_synonym = "outlays" in query or "military" in query
+            if file_year_between and year_filter:
                 strategy = "year_shifted"
-            elif file_year_between and year_filter and params[1:3] == [1940, 1944]:
-                strategy = "exact_year_filter"
-            elif file_year_between and not year_filter and params[1:3] == [1940, 1944]:
+            elif not file_year_between and year_filter and not is_synonym:
+                strategy = "exact_year_strict"
+            elif not file_year_between and year_filter and is_synonym:
+                strategy = "synonym_year_strict"
+            elif file_year_between and not year_filter and not is_synonym:
                 strategy = "exact_year_window"
-            elif not file_year_between and not ("outlays" in query or "military" in query):
+            elif not file_year_between and not year_filter and not is_synonym:
                 strategy = "exact_unrestricted"
+            elif file_year_between and not year_filter and is_synonym:
+                strategy = "synonym_year_window"
+            elif not file_year_between and not year_filter and is_synonym:
+                strategy = "synonym_unrestricted"
             else:
                 strategy = "unknown"
             self.calls.append(strategy)
@@ -411,7 +410,8 @@ def test_fts_channel_trace_runs_full_progressive_cascade():
     conn = cast(Any, FakeConn())
     trace = _fts_channel_trace(conn, ["expenditures", "defense"], [1940], False, top_n=10)
     assert [name for name, _ in trace.attempts] == [
-        "exact_year_filter",
+        "exact_year_strict",
+        "synonym_year_strict",
         "exact_year_window",
         "exact_unrestricted",
         "synonym_year_window",
@@ -451,6 +451,13 @@ def test_metric_channel_empty_metric():
 
 
 def test_metric_channel_uses_row_hint_synonyms_progressively():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
     class FakeConn:
         def __init__(self):
             self.calls = []
@@ -458,8 +465,8 @@ def test_metric_channel_uses_row_hint_synonyms_progressively():
         def execute(self, sql, params):
             self.calls.append(params[0])
             if params[0] == "military expenditures":
-                return [{"id": 7, "score": -6.0}]
-            return []
+                return FakeResult([{"id": 7, "score": -6.0}])
+            return FakeResult([])
 
     conn = cast(Any, FakeConn())
     rows = _metric_channel(
@@ -477,6 +484,13 @@ def test_metric_channel_uses_row_hint_synonyms_progressively():
 
 
 def test_metric_channel_skips_synonyms_when_exact_hits_enough():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
     class FakeConn:
         def __init__(self):
             self.calls = []
@@ -485,7 +499,7 @@ def test_metric_channel_skips_synonyms_when_exact_hits_enough():
             self.calls.append(params[0])
             if params[0] != "national defense expenditures":
                 raise AssertionError("synonym lookup should not run when exact hits are sufficient")
-            return [{"id": i, "score": -6.0 - i} for i in range(6)]
+            return FakeResult([{"id": i, "score": -6.0 - i} for i in range(6)])
 
     conn = cast(Any, FakeConn())
     rows = _metric_channel(
@@ -502,6 +516,13 @@ def test_metric_channel_skips_synonyms_when_exact_hits_enough():
 
 
 def test_metric_channel_trace_uses_partial_match_after_synonyms():
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
     class FakeConn:
         def __init__(self):
             self.calls = []
@@ -519,8 +540,8 @@ def test_metric_channel_trace_uses_partial_match_after_synonyms():
                 strategy = "partial_match"
             self.calls.append((strategy, exact_text))
             if strategy == "partial_match" and exact_text == "national defense expenditures":
-                return [{"id": 31, "score": -3.0}]
-            return []
+                return FakeResult([{"id": 31, "score": -3.0}])
+            return FakeResult([])
 
     conn = cast(Any, FakeConn())
     trace = _metric_channel_trace(
@@ -528,7 +549,7 @@ def test_metric_channel_trace_uses_partial_match_after_synonyms():
         "expenditures",
         "national defense",
         "",
-        [1940],
+        [],  # no target_years — tests the non-year cascade path
         False,
         top_n=5,
     )
@@ -899,13 +920,20 @@ def test_metric_channel_uses_row_hint_alternatives():
     """Metric channel tries each alternative for substring matching."""
     calls = []
 
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
     class FakeConn:
         def execute(self, sql, params):
             exact_text = params[0]
             calls.append(exact_text)
             if exact_text == "national defense and associated activities expenditures":
-                return [{"id": 99, "score": -8.0}]
-            return []
+                return FakeResult([{"id": 99, "score": -8.0}])
+            return FakeResult([])
 
     conn = cast(Any, FakeConn())
     # "national defense" primary row_hint + alternatives should produce

@@ -35,7 +35,7 @@ uv run python eval_decompose.py          # evaluate decompose phase output
 ./scripts/setup_agents.py                 # initialize agent infrastructure and task specs
 ./scripts/doctor_agents.py                # verify agent setup and diagnose issues
 ./scripts/setup_worktrees.sh              # create git worktrees in `.agent-worktrees/` for isolated agent stages
-./scripts/link_worktree_artifacts.sh      # link ledger.sqlite and cached decompose to worktrees
+./scripts/link_worktree_artifacts.sh      # symlink ledger.sqlite and cached decompose to worktrees
 ./scripts/refresh_worktrees_from_main.sh  # refresh worktrees from latest main branch
 DRY_RUN=1 ./scripts/agent_iterate.sh     # iterate agent rounds (use DRY_RUN=1 first)
 OFFICEQA_WT_ROOT="$PWD/.agent-worktrees" ./scripts/cursor_agent_once.sh retrieval  # run Cursor Agent on a stage
@@ -47,13 +47,18 @@ Pipeline: scout → decompose → retrieve → [_try_deterministic_fast_path] �
 
 **Scout phase** (deterministic): initial analysis of the question and corpus to understand scope and key signals.
 
-**Decompose phase** (LLM): parses question into a `QuestionSpec` with per-value `data_requests` (keywords, year hints) and a `compute_template` (Python expression tree for final aggregation).
+**Decompose phase** (LLM): parses question into a `QuestionSpec` with:
+- `period` — top-level signal ("CY" for calendar year, "FY" for fiscal year, or inferred from question)
+- per-value `data_requests` — each with keywords, year hints, and optional `retrieval_hint` to guide channel selection
+- `retrieval_hint` — optional guidance with `channel_preference` ("metric_exact" for exact row labels, "fts_keyword" for topical/fuzzy, "prose" for narrative context, "auto" to let retrieval decide), plus `must_match_phrases` and `avoid_phrases` for filtering
+- `compute_template` — Python expression tree for final aggregation
+- output format specification
 
 **Retrieve phase** (deterministic): three-channel funnel with progressive synonym expansion over `ledger.sqlite`:
 - **FTS channel** — FTS5 `tables_fts` over title/section/caption/columns/rows with year filtering. Good for topical/fuzzy questions.
 - **Metric channel** — substring lookup over `metrics.metric_slug` (normalized row label). Good when question's noun phrase matches a row label cleanly ("national defense" → exact slug hit). Mirrors arena's master_ledger retrieval.
 - **Prose/footnote channel** — supplementary context from `prose_fts` and `footnotes_fts` for ~6% of questions requiring non-table data. Weighted lower than direct table hits.
-- **Progressive expansion** — if initial queries don't reach threshold, fallback stages try synonym/partial matches via staged thresholds before hitting top-N limit. Tracks which strategy retrieved each row via `ChannelTrace`.
+- **Progressive expansion** — if initial queries don't reach threshold, fallback stages try synonym/partial matches via staged thresholds before hitting top-N limit. Tracks which strategy retrieved each row via `ChannelTrace`. Respects `retrieval_hint` channel_preference when present.
 
 Each channel returns top-N candidates; union is reranked by file_year proximity and strategy bonuses. Reranking also applies **period-aware scoring**: tables matching the decomposed year_mode (calendar vs fiscal) receive +0.10 boost; non-matching receive -0.06 penalty (scaled by 0.2× to act as a tiebreaker rather than dominating FTS+metric scores). Multi-request hint extraction processes all `data_requests` from decompose (not just the first) to drive parallel retrieval strategies. Different retrieval strategies (primary_exact, synonym_exact, partial_match, exact_year_filter, exact_year_window, synonym_year_window, synonym_unrestricted, year_shifted, exact_unrestricted) receive weighted bonuses to boost matches from higher-confidence retrieval paths. Prose/footnote entries are supplementary (up to ~PF_MAX_SLOTS slots beyond the table top_k limit) and returned alongside table entries. All channels backed by the same lossless cell store:
 - **tables** — source tables with signature hash for deduplication
@@ -91,8 +96,8 @@ legacy fallback; prefer the JSON corpus for all new code.
 **Core pipeline** (what `solve.py` calls, in order):
 - `solve.py` — pipeline orchestrator: scout → decompose → retrieve → extract → compute → verify. Handles retry loops and LLM budget (MAX_LLM_CALLS=6). Supports `--eval [--n N] [--offset OFFSET] [--oracle] [--parallel P]`.
 - `scout.py` — deterministic pre-decompose index peek; grounds decompose with real corpus signals.
-- `decompose.py` — LLM call 1: question → `QuestionSpec` (data_requests + compute template + output format). Contains `DECOMPOSE_SYSTEM` prompt and all decompose helpers.
-- `retrieve_v2.py` — three-channel FTS + metric + prose/footnote funnel against `ledger.sqlite`. Progressive synonym expansion, period-aware reranking, strategy-weighted scoring.
+- `decompose.py` — LLM call 1: question → `QuestionSpec` (period, data_requests with retrieval hints, compute template, output format). Contains `DECOMPOSE_SYSTEM` prompt and all decompose helpers.
+- `retrieve_v2.py` — three-channel FTS + metric + prose/footnote funnel against `ledger.sqlite`. Progressive synonym expansion, period-aware reranking, strategy-weighted scoring, channel-preference routing from retrieval hints.
 - `find.py` — deterministic ledger lookups: `resolve_cells()`, bottom-up cell search, `try_deterministic_fast_path()` (tries to skip LLM extraction entirely), vocabulary fetch for decompose.
 - `extract.py` — LLM call 2: grounded per-request value extraction from retrieved tables. Pre-extraction helpers for monthly values and CY/FY row filtering. Quality retry, ledger cross-check, cohort filtering.
 - `compute.py` — safe Python evaluation of the compute template. Dispatches named operations (sum, average, percent_change, linear_regression, …). Unit conversion utilities.
@@ -125,6 +130,7 @@ legacy fallback; prefer the JSON corpus for all new code.
 - `test_solve.py` — smoke tests for pipeline entry points (no LLM calls).
 - `test_recall_with_decompose.py` — retrieval recall with pre-cached decompose specs.
 - `test_variants.py` — variant configuration testing.
+- `sql_solve.py` — SQL-based solver variant for exploring pure query-language approaches to question decomposition and retrieval.
 
 **Migrations (already applied, in `scripts/migrations/`):**
 - `migrate_metrics_to_view.py`, `migrate_fill_column_years.py`, `migrate_propagate_year.py`

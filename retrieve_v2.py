@@ -1069,13 +1069,50 @@ def _fts_channel_trace(
     if not q_tokens:
         return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
 
-    # Fast path: candidate set already narrowed by family+year funnel — just fetch
-    # them directly by ID. No FTS needed; reranker handles scoring downstream.
+    if limit_ids is not None and not limit_ids:
+        return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
+
+    # When the candidate set is already narrowed by family+year funnel, run a
+    # single broad FTS pass (OR query) over the full index and Python-filter to
+    # limit_ids. This gives real BM25 scores for ranking without burning 7 stage
+    # round-trips. Falls back to direct fetch if FTS returns nothing in the set.
     if limit_ids is not None:
-        if not limit_ids:
-            return ChannelTrace(rows=[], strategy_by_id={}, attempts=[])
+        synonym_toks = _expand_synonyms(q_tokens, source_text)
+        broad_query = _fts_escape(synonym_toks, mode="or") or _fts_escape(q_tokens, mode="or")
+        if broad_query:
+            # Cap pool_size: 3× limit_ids keeps BM25 scores meaningful without
+            # fetching the entire table index. 10K upper bound keeps latency ~OK.
+            pool_size = min(10000, max(5000, len(limit_ids) * 3))
+            sql_fts = (
+                " SELECT"  # nosec B608
+                " t.id, t.file, t.element_seq, t.element_id, t.page_id,"
+                " t.file_year, t.file_month,"
+                " t.title, t.section, t.caption, t.unit, t.period,"
+                " t.n_rows, t.n_cols, t.signature,"
+                " bm25(tables_fts, 2.0, 1.5, 1.5, 2.0, 2.5) AS score"
+                " FROM tables_fts"
+                " JOIN tables t ON t.id = tables_fts.rowid"
+                " WHERE tables_fts MATCH ?"
+                " AND t.table_kind = 'data'"
+                " ORDER BY score"
+                f" LIMIT {pool_size}"
+            )
+            all_rows = conn.execute(sql_fts, [broad_query]).fetchall()
+            filtered = [r for r in all_rows if r["id"] in limit_ids]
+            if filtered:
+                strat = "fts_limit_broad"
+                return ChannelTrace(
+                    rows=filtered[:top_n],
+                    strategy_by_id={r["id"]: strat for r in filtered[:top_n]},
+                    attempts=[(strat, len(filtered))],
+                )
+        # FTS returned nothing in limit_ids — fall back to direct candidates
+        # ONLY when we have target_years (a specific search). For completely
+        # open-ended queries (no years), returning everything is noise.
+        if not target_years:
+            return ChannelTrace(rows=[], strategy_by_id={}, attempts=[("fts_limit_broad", 0)])
         id_ph = ",".join("?" * len(limit_ids))
-        rows = conn.execute(
+        direct_rows = conn.execute(
             f"SELECT id, file, element_seq, element_id, page_id, file_year, file_month,"
             f" title, section, caption, unit, period, n_rows, n_cols, signature,"
             f" 0.0 AS score"
@@ -1083,9 +1120,9 @@ def _fts_channel_trace(
             list(limit_ids),
         ).fetchall()
         return ChannelTrace(
-            rows=rows,
-            strategy_by_id={r["id"]: "direct_candidate" for r in rows},
-            attempts=[("direct_candidate", len(rows))],
+            rows=direct_rows,
+            strategy_by_id={r["id"]: "direct_fallback" for r in direct_rows},
+            attempts=[("direct_fallback", len(direct_rows))],
         )
 
     def _build_year_filter_clause() -> tuple[str, tuple]:
@@ -1766,7 +1803,10 @@ class _RetrievalContext:
                 self.requested_granularities.add(h["granularity"])
 
         self.target_years = sorted(self.all_target_years)
-        self.query_text = f"{question} {' '.join(self.all_metrics)} {' '.join(self.all_row_hints)} {' '.join(self.all_col_hints)}".strip()
+        # Include must_match_phrases in the query so they boost FTS retrieval
+        # (not just ranking). They're short, precise phrases from decompose W1.
+        phrase_text = " ".join(self.must_match_phrases)
+        self.query_text = f"{question} {' '.join(self.all_metrics)} {' '.join(self.all_row_hints)} {' '.join(self.all_col_hints)} {phrase_text}".strip()
         self.q_tokens = content_tokens(self.query_text)
 
         self.title_patterns: list[str] = []
@@ -1804,13 +1844,15 @@ def _find_candidate_families(conn: sqlite3.Connection, ctx: _RetrievalContext) -
             sql = f"SELECT DISTINCT family_id FROM table_family_columns WHERE family_id IN ({ph_fid}) AND ({like_clauses})"
             col_rows = conn.execute(sql, (*fid_list, *like_params)).fetchall()
             col_fids = {r[0] for r in col_rows if r[0]}
-            if col_fids:
+            # Only narrow if col filter keeps >=25% of candidates — avoids
+            # over-aggressive elimination when col_hint tokens are imprecise.
+            if col_fids and len(col_fids) >= max(10, len(candidate_fids) * 0.25):
                 candidate_fids &= col_fids
 
     return candidate_fids
 
 
-_INSTANCES_PER_FAMILY = 5  # max year-matching instances to keep per family
+_INSTANCES_PER_FAMILY = 12  # max year-matching instances to keep per family
 
 
 def _get_best_instances_for_families(

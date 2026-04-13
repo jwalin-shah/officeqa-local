@@ -1737,7 +1737,7 @@ def extract_structured(
             else:
                 hint_resolved = False
 
-            if len(all_row_labels) > 4 and not hint_resolved:
+            if len(all_row_labels) > 2 and not hint_resolved:
                 picked = _llm_pick_rows(question, dr, all_row_labels, llm_counter)
                 if picked:
                     picked_lower = {p.lower() for p in picked}

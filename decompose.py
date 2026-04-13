@@ -473,6 +473,70 @@ def _granularity_mismatch_feedback(question: str, spec: dict) -> str | None:
     return None
 
 
+def _validate_row_hints_against_ledger(spec: dict, question: str) -> str:
+    """Check that each corpus DR's row_hint appears in at least one ledger table.
+
+    Returns a non-empty feedback string if any row_hint has zero ledger matches,
+    with actual matching labels to guide the LLM. Empty string = all OK.
+    """
+    drs = spec.get("data_requests") or []
+    if not drs:
+        return ""
+
+    from find import _conn  # type: ignore[attr-defined]
+    import sqlite3 as _sqlite3
+
+    try:
+        conn = _conn()
+    except Exception:
+        return ""
+
+    problems: list[str] = []
+    for dr in drs:
+        if not isinstance(dr, dict):
+            continue
+        if str(dr.get("source") or "corpus").lower() not in ("", "corpus"):
+            continue
+        rh = (dr.get("row_hint") or "").strip()
+        if not rh or len(rh.split()) > 12:
+            continue
+
+        # Check if any row in ledger has a metric_slug matching the hint
+        slug = re.sub(r"[^\w\s\-]", "", rh.lower()).strip()
+        slug_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", slug) if len(t) >= 3]
+        if not slug_tokens:
+            continue
+
+        like_clauses = " AND ".join(["metric_slug LIKE ?" for t in slug_tokens])
+        like_params = [f"%{t}%" for t in slug_tokens]
+        try:
+            rows = conn.execute(
+                f"SELECT DISTINCT metric_slug FROM row_label_lookup WHERE {like_clauses} LIMIT 5",
+                like_params,
+            ).fetchall()
+        except Exception:
+            continue
+
+        if not rows:
+            # Fetch real labels from the vocabulary to suggest alternatives
+            years = [y for y in (dr.get("years") or []) if isinstance(y, int)]
+            try:
+                vocab = fetch_vocabulary(question, years=years or None)
+                real_labels = (vocab.get("row_labels") or [])[:8]
+            except Exception:
+                real_labels = []
+            suggestion = (
+                f", ".join(f'"{r}"' for r in real_labels) if real_labels else "(none found)"
+            )
+            problems.append(
+                f"row_hint={rh!r} for DR id={dr.get('id')!r} has NO matches in the "
+                f"Treasury ledger. This label does not exist. Real labels from matching "
+                f"tables: {suggestion}. Please pick a label verbatim from that list."
+            )
+
+    return "\n".join(problems) if problems else ""
+
+
 def _normalize_row_hint_alternatives(spec: dict) -> None:
     """Ensure each DR has a list[str] ``row_hint_alternatives`` (may be empty)."""
     for dr in spec.get("data_requests") or []:
@@ -704,6 +768,21 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
                     scout_hint=scout_hint,
                     feedback=f"[GRANULARITY_FIX]\n{gran_fb}",
                 )
+
+        # Post-decompose row_hint validation: if a row_hint doesn't appear
+        # in the ledger at all, retry once with real label suggestions.
+        # Only run on first attempt (no feedback yet) to avoid infinite retry.
+        if "[ROW_HINT_FIX]" not in (feedback or ""):
+            try:
+                rh_fb = _validate_row_hints_against_ledger(spec, question)
+                if rh_fb:
+                    return decompose(
+                        question,
+                        scout_hint=scout_hint,
+                        feedback=f"[ROW_HINT_FIX]\n{rh_fb}",
+                    )
+            except Exception as e:
+                print(f"  [decompose] row_hint validation failed: {e}", flush=True)
 
         return spec
 

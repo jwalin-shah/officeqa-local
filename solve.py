@@ -253,18 +253,18 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
     if verbose:
         print(f"  Spec: {json.dumps(spec, indent=2)[:800]}")
 
-    # Phase 2: retrieve — bottom-up primary, retrieve_v2 fallback per DR
-    per_dr = retrieve_bottomup(spec, question, top_k=5)
-    # Fill any DRs that got no bottom-up hits with retrieve_v2
-    empty_drs = [dr_id for dr_id, entries in per_dr.items() if not entries]
-    if empty_drs:
-        if verbose:
-            print(
-                f"  Bottom-up missed {len(empty_drs)} DR(s) — falling back to retrieve_v2: {empty_drs}"
-            )
-        fallback = retrieve_for_spec(spec, question, verbose=verbose, llm_counter=llm_calls)
-        for dr_id in empty_drs:
-            per_dr[dr_id] = fallback.get(dr_id, [])
+    # Phase 2: retrieve — always run retrieve_v2 for a diverse candidate pool;
+    # merge with bottom-up when it finds exact cell hits (dedup by element_seq).
+    bottomup = retrieve_bottomup(spec, question, top_k=5)
+    per_dr = retrieve_for_spec(spec, question, verbose=verbose, llm_counter=llm_calls)
+    # Prepend any bottom-up hits that aren't already in the retrieve_v2 pool.
+    for dr_id, bu_entries in bottomup.items():
+        if not bu_entries:
+            continue
+        existing_seqs = {(e["file"], e["element_seq"]) for e in per_dr.get(dr_id, [])}
+        prepend = [e for e in bu_entries if (e["file"], e["element_seq"]) not in existing_seqs]
+        if prepend:
+            per_dr[dr_id] = prepend + per_dr.get(dr_id, [])
 
     total = _total_entries(per_dr)
     if verbose:
@@ -273,10 +273,7 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
             for dr_id, entries in per_dr.items()
             if entries and entries[0].get("retrieval_channel") == "bottomup"
         )
-        print(
-            f"  Retrieve: {total} entries across {len(per_dr)} DRs "
-            f"({bu_hits} bottom-up, {len(per_dr) - bu_hits} fallback)"
-        )
+        print(f"  Retrieve: {total} entries across {len(per_dr)} DRs ({bu_hits} bottom-up-led)")
     if total == 0:
         if not _bump_llm("decompose(retry)"):
             return "RETRIEVE_EMPTY"
