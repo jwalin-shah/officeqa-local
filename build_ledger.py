@@ -489,6 +489,23 @@ def parse_table_lxml(html_str: str) -> dict:
             if grid[r][c] is None:
                 grid[r][c] = ""
 
+    # Post-fill: propagate row-label text through column-0 rowspan extensions.
+    # When a row label like "National defense" spans N rows, extension rows get
+    # grid[r][0] = "" which produces empty row_path — breaking retrieval.
+    # Fix: forward-fill column 0 for extension cells (is_origin[r][0] == False)
+    # that follow a non-empty origin. Stop at the next origin cell.
+    # Scope: column 0 ONLY. Numeric data cells (other columns) must NOT be copied.
+    if max_cols > 0:
+        last_label = ""
+        for r in range(n_rows):
+            if is_origin[r][0]:
+                # This row has its own label — update the running label.
+                last_label = grid[r][0]  # type: ignore[assignment]
+            else:
+                # Extension cell: fill from the spanning label above if non-empty.
+                if last_label:
+                    grid[r][0] = last_label
+
     return {
         "parse_ok": True,
         "error": None,
@@ -663,14 +680,29 @@ def build_column_paths(grid: list[list[str]], is_header: list[bool]) -> list[dic
     if not header_row_indices and grid:
         header_row_indices = [0]
 
+    # Pre-compute per-row "filled" headers: propagate the last non-empty cell
+    # value left-to-right within each header row.  This handles colspan spans
+    # where the lxml parser writes the text only into the origin cell and fills
+    # extension cells with "".  Without propagation, "1940 > Jan." through
+    # "1940 > Dec." would lose the "1940 >" prefix for all but the first column.
+    filled: list[list[str]] = []
+    for r in header_row_indices:
+        row: list[str] = []
+        last_val = ""
+        for c in range(n_cols):
+            cell = (grid[r][c] if c < len(grid[r]) else "") or ""
+            cell = cell.strip()
+            if cell:
+                last_val = cell
+            row.append(last_val)
+        filled.append(row)
+
     cols: list[dict] = []
     for c in range(n_cols):
         parts: list[str] = []
         last_part: str | None = None
-        for r in header_row_indices:
-            if c >= len(grid[r]):
-                continue
-            cell = (grid[r][c] or "").strip()
+        for filled_row in filled:
+            cell = filled_row[c] if c < len(filled_row) else ""
             if cell and cell != last_part:
                 parts.append(cell)
                 last_part = cell
