@@ -115,3 +115,9 @@ Use `CURSOR_AGENT_MODE=plan` for a read-only pass first.
 - `retrieve_v2.py` is the canonical retrieval implementation.
 - `ledger.sqlite` and evaluation artifacts are large; keep a clear distinction between code and generated outputs.
 - The project should first become excellent on OfficeQA before being generalized to other benchmarks.
+
+---
+
+## Related
+
+**[OfficeQA Arena](https://github.com/jwalin-shah/officeqa-arena)** — Competition entry using this pipeline for the Sentient Arena benchmark.
