@@ -9,6 +9,7 @@ OfficeQA Solver — structured pipeline:
 
 import contextlib
 import json
+import os
 import sys
 
 from dotenv import load_dotenv
@@ -17,7 +18,9 @@ from compute import ComputeError, format_result, parse_unit, validate_extraction
 from compute import execute as compute_execute
 from decompose import decompose
 from extract import extract_structured
+from extract_sql import extract_sql
 from find import retrieve_bottomup, try_deterministic_fast_path
+from ledger_paths import get_ledger_sqlite_path
 from retrieve_v2 import retrieve as retrieve_v2
 from scout import scout
 from verify import verify_answer
@@ -207,7 +210,9 @@ def _run_extract_and_compute(
     return formatted, extraction
 
 
-def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
+def solve(
+    question: str, verbose: bool = False, use_verify: bool = True, cached_spec: dict | None = None
+) -> str:
     """Structured pipeline with feedback loops:
 
       scout → decompose → retrieve → extract → compute → verify
@@ -222,6 +227,12 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
 
     Each phase still fails loudly with an explicit error string so eval
     output tells us exactly which stage broke.
+
+    Args:
+      question: the question to solve
+      verbose: print debug output
+      use_verify: run verification phase
+      cached_spec: optional pre-computed QuestionSpec to skip decompose LLM call
     """
     # LLM call counter — tracks calls to decompose, extract_structured,
     # and verify_answer to enforce MAX_LLM_CALLS bound.
@@ -245,11 +256,16 @@ def solve(question: str, verbose: bool = False, use_verify: bool = True) -> str:
         print(f"  Scout hint:\n{hint[:400]}")
 
     # Phase 1: decompose (with one retry on empty retrieve)
-    if not _bump_llm("decompose"):
-        return "DECOMPOSE_FAILED"
-    spec = decompose(question, scout_hint=hint)
-    if spec is None:
-        return "DECOMPOSE_FAILED"
+    # If a cached spec is provided (e.g., from --cached-decompose eval mode),
+    # skip the decompose LLM call and use it directly.
+    if cached_spec:
+        spec = cached_spec
+    else:
+        if not _bump_llm("decompose"):
+            return "DECOMPOSE_FAILED"
+        spec = decompose(question, scout_hint=hint)
+        if spec is None:
+            return "DECOMPOSE_FAILED"
     if verbose:
         print(f"  Spec: {json.dumps(spec, indent=2)[:800]}")
 
@@ -578,6 +594,23 @@ if __name__ == "__main__":
         offset = 0
         parallel = 10
         oracle = "--oracle" in eval_args
+        use_cached_decompose = "--cached-decompose" in eval_args
+
+        # Load cached decompose specs if requested (skips live LLM decompose call)
+        _cached_specs: dict[str, dict] = {}
+        if use_cached_decompose:
+            import json as _jmod
+
+            cache_path = "decompose_eval.full.jsonl"
+            if os.path.exists(cache_path):
+                with open(cache_path) as _cf:
+                    for _line in _cf:
+                        _line = _line.strip()
+                        if _line:
+                            _entry = _jmod.loads(_line)
+                            _cached_specs[_entry["uid"]] = _entry.get("spec", {})
+                print(f"Loaded {len(_cached_specs)} cached decompose specs", flush=True)
+
         for i, a in enumerate(eval_args):
             if a == "--n" and i + 1 < len(eval_args):
                 with contextlib.suppress(ValueError):
@@ -601,28 +634,213 @@ if __name__ == "__main__":
 
         from reward import fuzzy_match_answer
 
+        def _extract_years_from_files(source_files_str: str) -> set[int]:
+            """Extract available years from gold file names.
+
+            Treasury bulletin filenames are treasury_bulletin_YYYY_MM.json,
+            so YYYY is the year of data in that file.
+            """
+            years = set()
+            for fname in source_files_str.split("\n"):
+                fname = fname.strip().replace(".txt", "").replace(".json", "")
+                # Extract YYYY from treasury_bulletin_YYYY_MM
+                parts = fname.split("_")
+                if len(parts) >= 3 and parts[0] == "treasury" and parts[1] == "bulletin":
+                    try:
+                        year = int(parts[2])
+                        years.add(year)
+                    except (ValueError, IndexError):
+                        pass
+            return years
+
+        def _enrich_oracle_entries_with_ledger(
+            entries: list[dict], source_files_str: str
+        ) -> list[dict]:
+            """Enrich oracle entries with ledger metadata (years, column headers, row labels).
+
+            Queries ledger.sqlite to populate column_headers, row_labels, years, etc.
+            This helps the LLM extract correctly by providing structured table info.
+            """
+            import sqlite3 as _sqlite3
+
+            ledger_path = get_ledger_sqlite_path()
+            if not ledger_path or not os.path.exists(ledger_path):
+                return entries  # Ledger not available, return as-is
+
+            # Get file stems to match against ledger
+            stems = [
+                f.strip().replace(".txt", "").replace(".json", "")
+                for f in source_files_str.split("\n")
+                if f.strip()
+            ]
+            file_patterns = [f"{s}.json" for s in stems]
+
+            try:
+                conn = _sqlite3.connect(ledger_path)
+                for entry in entries:
+                    entry_file = entry.get("file", "")
+                    if entry_file not in file_patterns:
+                        continue
+
+                    # Query ledger for metadata about this file's tables
+                    cursor = conn.cursor()
+
+                    # Get all tables in this file
+                    cursor.execute(
+                        "SELECT id, n_rows, n_cols FROM tables WHERE file = ? ORDER BY element_seq",
+                        (entry_file,),
+                    )
+                    table_rows = cursor.fetchall()
+
+                    if not table_rows:
+                        continue
+
+                    # For now, just get metadata from the first table in the file
+                    # (oracle mode gives all tables, so we pick first)
+                    first_table_id = table_rows[0][0]
+
+                    # Get column headers with years
+                    cursor.execute(
+                        "SELECT col_path, col_leaf, year_extracted FROM table_columns WHERE table_id = ? ORDER BY col_index",
+                        (first_table_id,),
+                    )
+                    cols = cursor.fetchall()
+                    entry["column_headers"] = [
+                        col[1] or col[0] for col in cols
+                    ]  # leaf or full path
+                    col_years = {col[2] for col in cols if col[2]}
+                    entry["years"] = sorted(col_years) if col_years else []
+
+                    # Get row labels with years
+                    cursor.execute(
+                        "SELECT row_path, row_leaf, year_extracted FROM table_rows WHERE table_id = ? AND NOT is_section_header ORDER BY row_index LIMIT 30",
+                        (first_table_id,),
+                    )
+                    rows = cursor.fetchall()
+                    entry["row_labels"] = [row[1] or row[0] for row in rows]  # leaf or full path
+                    row_years = {row[2] for row in rows if row[2]}
+                    if row_years:
+                        entry["years"] = sorted(set(entry.get("years", []) | row_years))
+
+                    # Get table dimensions
+                    cursor.execute(
+                        "SELECT n_rows, n_cols FROM tables WHERE id = ?", (first_table_id,)
+                    )
+                    dims = cursor.fetchone()
+                    if dims:
+                        entry["n_rows"] = dims[0]
+                        entry["n_cols"] = dims[1]
+
+                conn.close()
+            except Exception:
+                pass  # Ledger error, continue with unenriched entries
+
+            return entries
+
+        def _load_oracle_entries(source_files_str: str) -> list[dict]:
+            """Load all table entries directly from corpus_json gold files.
+
+            Bypasses retrieval entirely — gives extract the actual gold tables
+            without any ranking or filtering. Each table becomes one entry with
+            the same fields that retrieve_v2 produces.
+            """
+            import json as _json
+            import os as _os
+
+            entries = []
+            corpus_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "corpus_json")
+            stems = [
+                f.strip().replace(".txt", "").replace(".json", "")
+                for f in source_files_str.split("\n")
+                if f.strip()
+            ]
+            for stem in stems:
+                fpath = _os.path.join(corpus_dir, f"{stem}.json")
+                if not _os.path.exists(fpath):
+                    continue
+                try:
+                    with open(fpath) as fh:
+                        doc = _json.load(fh)
+                    elements = doc.get("document", {}).get("elements", [])
+                    # Gather section context before each table
+                    current_section = ""
+                    for elem in elements:
+                        etype = elem.get("type", "")
+                        if etype in ("section_header", "title"):
+                            current_section = (elem.get("content") or "").strip()
+                        if etype != "table":
+                            continue
+                        html = elem.get("content") or ""
+                        if not html:
+                            continue
+                        entries.append(
+                            {
+                                "file": f"{stem}.json",
+                                "element_id": elem.get("id", ""),
+                                "element_seq": len(entries),
+                                "page_id": (elem.get("bbox") or [{}])[0].get("page_id", 0)
+                                if isinstance(elem.get("bbox"), list)
+                                else (elem.get("bbox") or {}).get("page_id", 0),
+                                "section": current_section,
+                                "title": current_section,
+                                "caption": "",
+                                "column_headers": [],
+                                "row_labels": [],
+                                "years": [],
+                                "unit": "",
+                                "period": "",
+                                "n_rows": 0,
+                                "n_cols": 0,
+                                "retrieval_strategy": "oracle_direct",
+                                "retrieval_channel": "oracle",
+                                "html": html,
+                                "near_content": [],
+                                "probe_matched_rows": 0,
+                                "probe_best_cells": [],
+                                "probe_col_matches": 0,
+                                "has_target_year": True,
+                                "has_month_data": False,
+                                "has_required_granularity": True,
+                                "file_year": None,
+                                "file_month": None,
+                                "signature": "",
+                            }
+                        )
+                except Exception:
+                    continue
+            return entries
+
         def _solve_one(row: dict) -> tuple[dict, str]:
             question = row["question"]
             if oracle:
-                # Oracle mode: retrieve per-DR, then filter each DR's entries
-                # to only those whose file matches a gold source. This gives
-                # extract the right tables while still exercising retrieve_v2's
-                # in-file table ranking.
-                gold_stems = {
-                    f.strip().replace(".txt", "").replace(".json", "")
-                    for f in row["source_files"].split("\n")
-                    if f.strip()
-                }
-                spec = decompose(question, scout_hint=scout(question))
+                # Oracle mode: load gold tables directly from corpus_json —
+                # no retrieval step. Tests the extract+compute ceiling.
+                if use_cached_decompose and row.get("uid") in _cached_specs:
+                    spec = _cached_specs[row["uid"]]
+                else:
+                    spec = decompose(question, scout_hint=scout(question))
                 if spec is None:
                     return row, "DECOMPOSE_FAILED"
-                per_dr = retrieve_for_spec(spec, question)
-                filtered: dict[str, list[dict]] = {}
-                for dr_id, entries in per_dr.items():
-                    filtered[dr_id] = [
-                        e for e in entries if e.get("file", "").replace(".json", "") in gold_stems
-                    ]
-                extraction = extract_structured(spec, filtered, question, verbose=verbose)
+
+                # Validate: check if spec asks for years in the gold files
+                available_years = _extract_years_from_files(row["source_files"])
+                spec_years = set()
+                for dr in spec.get("data_requests", []):
+                    spec_years.update(dr.get("years") or [])
+
+                # If spec asks for years not in gold files, warn (but continue)
+                missing_years = spec_years - available_years
+                if missing_years and verbose:
+                    print(
+                        f"  ⚠️  Spec asks for years {sorted(missing_years)} not in gold files {sorted(available_years)}"
+                    )
+
+                # Oracle mode: extract values via SQL queries instead of HTML parsing
+                # LLM writes SQL to query the ledger directly against gold file
+                file_stem = row["source_files"].strip().replace(".txt", "").replace(".json", "")
+                gold_file = f"{file_stem}.json"
+
+                extraction = extract_sql(question, gold_file, spec, verbose=verbose)
                 if extraction is None or "extractions" not in extraction:
                     return row, "EXTRACT_FAILED"
                 for dr in spec.get("data_requests", []):
@@ -632,13 +850,12 @@ if __name__ == "__main__":
                         return row, f"NO_VALUES[{vid}]"
                 try:
                     result = compute_execute(spec, extraction["extractions"], verbose=verbose)
-                    source_unit = _determine_source_unit(filtered)
-                    return row, format_result(
-                        result, spec.get("output_format") or {}, source_unit=source_unit
-                    )
+                    return row, format_result(result, spec.get("output_format") or {})
                 except ComputeError as e:
                     return row, f"COMPUTE_FAILED: {e}"
-            return row, solve(question, verbose=verbose)
+            # Normal (non-oracle) eval path: use cached_spec if available to skip decompose LLM call
+            cached = _cached_specs.get(row.get("uid")) if use_cached_decompose else None
+            return row, solve(question, verbose=verbose, cached_spec=cached)
 
         correct, total = 0, 0
         error_categories: dict[str, int] = {}

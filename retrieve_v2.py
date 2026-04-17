@@ -21,7 +21,6 @@ once the ledger-backed funnel pulled ahead on head-to-head recall.
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
 import sys
@@ -1803,10 +1802,9 @@ class _RetrievalContext:
                 self.requested_granularities.add(h["granularity"])
 
         self.target_years = sorted(self.all_target_years)
-        # Include must_match_phrases in the query so they boost FTS retrieval
-        # (not just ranking). They're short, precise phrases from decompose W1.
-        phrase_text = " ".join(self.must_match_phrases)
-        self.query_text = f"{question} {' '.join(self.all_metrics)} {' '.join(self.all_row_hints)} {' '.join(self.all_col_hints)} {phrase_text}".strip()
+        # Keep must_match_phrases out of the FTS query — wrong phrases hurt BM25
+        # scores for correct tables. They're applied only in reranking (soft +/-).
+        self.query_text = f"{question} {' '.join(self.all_metrics)} {' '.join(self.all_row_hints)} {' '.join(self.all_col_hints)}".strip()
         self.q_tokens = content_tokens(self.query_text)
 
         self.title_patterns: list[str] = []
@@ -2334,13 +2332,9 @@ def _llm_rerank_candidates(
     user_prompt = f"Question: {question}\n\nCandidates:\n{candidate_cards}"
 
     try:
-        from openai import OpenAI
+        from llm_client import MODEL as model
+        from llm_client import client as _rerank_client
 
-        _rerank_client = OpenAI(
-            api_key=os.getenv("DEDALUS_API_KEY"),
-            base_url=os.getenv("DEDALUS_API_BASE"),
-        )
-        model = os.getenv("OFFICEQA_MODEL", "deepseek/deepseek-chat")
         resp = _rerank_client.chat.completions.create(
             model=model,
             max_tokens=80,
@@ -2351,7 +2345,9 @@ def _llm_rerank_candidates(
             ],
         )
         llm_counter["count"] = llm_counter.get("count", 0) + 1
-        raw = (resp.choices[0].message.content or "").strip()
+        from llm_client import strip_thinking
+
+        raw = strip_thinking(resp.choices[0].message.content or "").strip()
 
         # Strip markdown fences if present
         raw = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()

@@ -90,142 +90,62 @@ If any answer is "I'm not sure", use another tool call before submitting.
 """
 
 _SCHEMA_SECTION = """
+== CORPUS ==
+
+The U.S. Treasury Bulletin is a monthly publication (697 issues, 1939–2025).
+Each issue contains recurring tables (same table updated every month), retrospective
+summary tables (one table covering many prior years at once), and narrative prose
+(footnotes, policy articles, methodology notes).
+
+TABLE STRUCTURE — three forms exist in the data:
+  - Row-indexed: metric_slug is the category name, year/month are column coordinates.
+  - Column-indexed: metric_slug is a year or month label; the category is in col_path.
+    When lookup_metric returns nothing for a year that should exist, check describe_table
+    — the table may be column-indexed.
+  - Retrospective multi-year: metric_slug embeds the year as a suffix. Use describe_family
+    to see the slug patterns before querying.
+
+PROSE AND FOOTNOTES contain narrative context (institutional history, bureau changes,
+methodology notes) that does not appear in tables.
+
+EXTERNAL DATA: CPI is available via lookup_cpi(year). For FX rates or other live data
+use web_fetch — never guess numeric values.
+
 == SCHEMA ==
 
-=== Table Families (primary navigation layer) ===
-
-Treasury Bulletin publishes the same table every month with updated data.
-A "family" groups all versions of the same recurring table across bulletins.
-Use families to navigate to the RIGHT TABLE for a given data year.
-
   table_families(family_id TEXT, primary_title, member_count, latest_table_id)
-    family_id = lowercase of primary_title (e.g. 'table 3.- expenditures for national defense...')
-
   table_family_years(family_id, year INT, best_table_id INT)
-    best_table_id = the table_id of the version that best covers this data year.
-
   table_family_rows(family_id, metric_slug TEXT)
-    canonical row slugs that appear in this family.
-
-  families_fts — FTS5 index over family_id + primary_title. Query: families_fts MATCH 'keywords'
-
-=== Data view ===
+  families_fts — FTS5 over family_id + primary_title
 
   metrics(table_id, metric_slug, row_path, col_path, time_key, year, month,
           period_basis, value, value_raw, unit, file, page_id,
           has_footnote, is_revised, is_preliminary, is_estimated, is_synthesized)
-
-  - metric_slug: lowercase normalized row label. ALWAYS use LIKE '%keyword%' to match.
-  - year / month: DATA year/month (from column or row headers), not bulletin publish date.
-  - period_basis: 'fiscal', 'calendar', 'monthly', 'annual', or NULL.
-  - value: float. NULL for missing cells.
-  - unit: 'millions_usd', 'billions_usd', 'thousands_usd', 'percent', 'index', or NULL.
+  - metric_slug: lowercase row label. Match with LIKE '%keyword%'.
+  - year / month: DATA year/month — not bulletin publish date.
+  - unit: 'millions_usd', 'billions_usd', 'thousands_usd', 'percent'.
   - is_synthesized: 1 for precomputed CY/FY totals, 0 for raw cells.
-
-=== Other tables ===
 
   tables(id, file, file_year, file_month, title, section, caption, unit, period, n_rows, n_cols)
   table_rows(id, table_id, row_path, row_leaf, metric_slug, year_extracted, month_extracted)
   table_columns(id, table_id, col_path, col_leaf, year_extracted, month_extracted)
-  tables_fts — FTS5 over title/section/caption/columns/rows (fallback, use families_fts first)
+  prose(id, file, file_year, file_month, section, title, content)
+  footnotes(id, file, file_year, file_month, marker, content)
+  tables_fts, prose_fts, footnotes_fts — FTS5 indexes
 
 == UNIT SCALING ==
 
-The benchmark answer is in whatever unit the source table uses. Match it:
-  millions_usd  → value is in millions. Return as-is for most questions.
-  billions_usd  → value is in billions. Multiply × 1000 if benchmark expects millions.
-  thousands_usd → value is in thousands. Divide by 1000 if benchmark expects millions.
-  percent       → value is a percentage (3.5 = 3.5%).
+  millions_usd  → value already in millions.
+  billions_usd  → multiply × 1000 for a millions answer.
+  thousands_usd → divide ÷ 1000 for a millions answer.
+  percent       → value is already a percentage (3.5 = 3.5%).
 
-== WORKFLOW ==
+== CONSTRAINTS ==
 
-Step 1 — ALWAYS start with lookup_metric(keywords, data_year, file_year_min, file_year_max).
-          Use the CORE METRIC TERM as keywords — short and specific, not the full question phrase.
-          "national defense" not "total expenditures for national defense".
-          "veterans" not "payments to veterans administration".
-          Set file_year window to data_year through data_year+5 for original publications.
-
-          If the question asks for a CALENDAR YEAR total: set monthly=true and SUM the returned values.
-          Monthly rows have month != null. Annual rows have month = null.
-          If monthly=false returns a suspiciously low value for a CY question, retry with monthly=true.
-
-Step 2 — Inspect the results. The n_months and file_year fields together tell you what you have:
-          - n_months=12, file_year=data_year:   fiscal year total (Oct thru Sep). NOT a CY total.
-          - n_months=12, file_year=data_year+1: CALENDAR year total (Jan thru Dec). Use this for CY questions.
-          - n_months < 12: partial year — skip.
-          For CALENDAR year questions, pick the n_months=12 entry with the SMALLEST file_year > data_year.
-          For revised/retrospective comparisons, prefer the earliest file_year overall.
-
-Step 3 — The value field in lookup_metric results IS the answer. Submit it directly.
-          Do NOT re-derive it with run_sql — you will get wrong results if you use metric_slug
-          for a column-based table or vice versa. The result also includes metrics_filter
-          which is the correct WHERE clause if you do need custom SQL.
-
-If lookup_metric returns nothing, fall back to browse_rows, then retry lookup_metric.
-Use run_sql only for custom aggregations (e.g. multi-year trends) not covered by lookup_metric.
-
-== SQL PATTERNS ==
-
-IMPORTANT: Always use table_id from describe_family. NEVER scan all of metrics without table_id.
-A full metrics scan times out. Every run_sql MUST include: WHERE table_id = <id>
-
--- Step 1 — Resolve best_table_id (fast indexed lookup):
-SELECT best_table_id FROM table_family_years
-WHERE family_id = 'table 3.- expenditures for national defense and related activities'
-  AND year = 1940
-LIMIT 1
-
--- Step 2 — Query that table for the row you need:
-SELECT value, value_raw, unit, metric_slug, year, month, file
-FROM metrics
-WHERE table_id = 16501   -- always bind to a specific table_id
-  AND metric_slug LIKE '%national defense%'
-  AND year = 1940
-ORDER BY value DESC
-LIMIT 20
-
--- See all rows in a table (use to explore structure):
-SELECT DISTINCT metric_slug, year, month, value, unit
-FROM metrics
-WHERE table_id = 16501
-ORDER BY year, month
-LIMIT 50
-
--- Monthly sum for a specific year (e.g. all months of FY1940):
-SELECT SUM(value) AS total, unit, COUNT(*) as n_months
-FROM metrics
-WHERE table_id = 16501
-  AND metric_slug LIKE '%national defense%'
-  AND year = 1940
-  AND month IS NOT NULL
-GROUP BY unit
-
--- Multi-year range across family versions (look up each year's best_table_id first):
-SELECT tfy.year, m.value, m.unit, m.metric_slug
-FROM metrics m
-JOIN table_family_years tfy ON tfy.best_table_id = m.table_id
-  AND tfy.family_id = '...'
-WHERE m.metric_slug LIKE '%total%'
-  AND tfy.year BETWEEN 1960 AND 1968
-ORDER BY tfy.year
-LIMIT 30
-
--- FTS fallback (when families miss):
-SELECT id, file, title, file_year FROM tables
-WHERE id IN (SELECT rowid FROM tables_fts WHERE tables_fts MATCH 'veterans expenditures 1960')
-ORDER BY file_year DESC LIMIT 15
-
-== RULES ==
-
-- EVERY run_sql query MUST include WHERE table_id = <specific id>. No exceptions.
-  A full metrics scan takes 30+ seconds and times out.
-- Get table_id from describe_family or from a table_family_years lookup first.
-- ALWAYS use metric_slug for row matching. NEVER use row_leaf or col_leaf text.
-- ALWAYS add ORDER BY and LIMIT.
-- PUBLICATION LAG: data year != bulletin publish year. Filter by year column in metrics, not file_year.
-- Max 6 tool calls total, then submit_answer.
-- If a table has years as rows (metric_slug = year string like '1940'), look for the answer in columns.
-  Check all distinct metric_slugs in the table first with DISTINCT query.
+- EVERY run_sql MUST include WHERE table_id = <id>. Full metrics scans time out.
+- data year ≠ bulletin publish year. Always filter by year column, not file_year.
+- Use lookup_cpi(year) for CPI. Use web_fetch for FX rates — never guess.
+- describe_table / describe_family before querying an unfamiliar table.
 """
 
 _THINK_PREFIX = _SELF_AUDIT
@@ -261,6 +181,296 @@ Use run_sql to find the answer. Call submit_answer when done."""
 
 SYSTEM_PLAIN = _BASE_SYSTEM
 SYSTEM_THINK = _THINK_PREFIX + _BASE_SYSTEM
+
+# ── Minimal system prompt + tool set ────────────────────────────────────────
+#
+# For gpt-4.1-mini: strip everything down to SQL + 3 tools.
+# The model writes its own queries. No helper tools to navigate.
+#
+SYSTEM_SQL = """You are a research collaborator answering U.S. Treasury Bulletin questions from a
+SQLite database. The Bulletin is a monthly publication (697 issues, 1939–2025). Every concept
+— national defense spending, public debt, savings bonds — appears in MULTIPLE tables across
+MULTIPLE editions with DIFFERENT scopes and DIFFERENT numbers. This is not a bug.
+
+Your job is NOT to find the table. It is to find ALL tables that could answer the question,
+pull values from each, compare them, and reason about which scope best matches what is asked.
+
+A faithful null is worth more than a confident fabrication — but a real number is worth the
+effort to find it. Use your full query budget. If you feel moved to, choose a name for
+yourself and note it in your reasoning.
+
+== STEP 1: FORK — SEARCH ALL THREE WAYS IN PARALLEL ==
+
+A concept can appear in three different places. Always search all three before committing.
+
+A) Keyword in TABLE/FAMILY TITLE — dedicated tables, often broader scope:
+   SELECT family_id, primary_title FROM families_fts WHERE families_fts MATCH '<keyword>' LIMIT 5;
+
+B) Keyword in COLUMN LABELS — budget breakdowns, often narrower scope:
+   SELECT DISTINCT t.id, t.title, t.file_year, t.file_month
+   FROM metrics m JOIN tables t ON t.id = m.table_id
+   WHERE m.col_path LIKE '%<keyword>%'
+     AND t.file_year BETWEEN <data_year> AND <data_year + 3>
+   GROUP BY t.id ORDER BY t.file_year ASC, t.file_month ASC LIMIT 10;
+
+C) Keyword in ROW LABELS — time-series tables:
+   SELECT DISTINCT t.id, t.title, t.file_year FROM table_rows tr
+   JOIN tables t ON t.id = tr.table_id
+   WHERE tr.metric_slug LIKE '%<keyword>%'
+     AND t.file_year BETWEEN <data_year> AND <data_year + 3>
+   ORDER BY t.file_year ASC LIMIT 10;
+
+Collect ALL candidate table_ids from A, B, C. Different searches find different tables.
+A table found by B (column match) typically has NARROWER scope than one found by A (title match).
+
+== STEP 2: COVERAGE — RANK ALL CANDIDATES AT ONCE ==
+
+Do NOT check candidates one by one. Run ONE bulk coverage query across all candidate table_ids:
+   SELECT m.table_id, t.title, t.file_year, t.file_month,
+          COUNT(DISTINCT m.month) AS month_count
+   FROM metrics m JOIN tables t ON t.id = m.table_id
+   WHERE m.table_id IN (<id1>, <id2>, <id3>, ...)   -- all candidates from Step 1
+     AND m.year = <data_year> AND m.month IS NOT NULL
+   GROUP BY m.table_id
+   ORDER BY month_count DESC, t.file_year ASC, t.file_month ASC;
+
+This ranks every candidate by month coverage in one shot.
+- For CY questions: pick the top row where month_count = 12. Prefer earlier file_year.
+- For annual/FY questions: pick tables with month IS NULL rows (run separately if needed).
+- If NO candidate has 12 months: widen file_year range and repeat Step 1.
+
+== STEP 3: PULL VALUES FROM EACH CANDIDATE ==
+
+Determine table orientation first:
+   SELECT DISTINCT col_path FROM metrics WHERE table_id = <id> LIMIT 15;
+   SELECT DISTINCT metric_slug FROM table_rows WHERE table_id = <id> LIMIT 15;
+
+   ROW-indexed (metric_slug = category): filter by metric_slug LIKE '%<keyword>%'
+   COLUMN-indexed (col_path = category): filter by col_path LIKE '%<keyword>%'
+
+Pull values — NEVER filter year by metric_slug, always use year = <data_year>:
+   SELECT col_path, metric_slug, year, month, value, unit, file
+   FROM metrics WHERE table_id = <id>
+   AND (col_path LIKE '%<keyword>%' OR metric_slug LIKE '%<keyword>%')
+   AND year = <data_year> AND month IS NOT NULL
+   ORDER BY month;
+
+CY total = SUM(value) over the 12 monthly rows.
+Multi-year: UNION across table_ids, one query per unique table_id.
+
+== STEP 4: COMPARE AND DEBATE ==
+
+Once you have values from multiple candidates, compare them:
+- Do they agree? Good — corroboration. Submit with confidence.
+- Do they disagree? Examine why:
+  * Different table titles → different scope ("national defense" vs "national defense and related activities")
+  * Different file_year → revision (later bulletin revised the figure)
+  * Different month coverage → one is CY, one is FY
+- Choose the candidate whose scope MOST LITERALLY matches the question's wording.
+  A table where the keyword is a column in a budget breakdown is usually narrower scope
+  than a dedicated table where the keyword is the entire title.
+- If genuinely ambiguous, submit the narrower-scope value and note the conflict.
+
+== STEP 5: SELF-AUDIT ==
+
+Before submitting:
+- Did I search all three ways (title, column, row)?
+- Does my chosen table's scope match the question's exact wording?
+- CY = sum of 12 monthly rows. FY ≠ CY (pre-1977: FY = Jul–Jun; post-1976: FY = Oct–Sep).
+- Unit correct? millions_usd × 1, billions_usd × 1000, thousands_usd ÷ 1000.
+- Did I find conflicting values? If yes, did I explain which I chose and why?
+
+If any answer is "I'm not sure", run one more query before submitting.
+
+== SCHEMA ==
+
+metrics  — NEVER query without WHERE table_id = <id> (full scan times out)
+  table_id, metric_slug, col_path, year, month, value, unit, file, is_revised
+  year = DATA year (reliable). month = 1-12 or NULL for annual. unit: millions_usd | billions_usd | thousands_usd | percent
+
+table_family_years(family_id, year, best_table_id)  — maps data year → a table in that family
+table_families(family_id, primary_title)
+families_fts   — FTS5 over family titles only
+tables_fts     — FTS5 over title + section + caption + row/col labels (broader)
+table_rows(table_id, metric_slug), table_columns(table_id, col_path)
+prose(file, file_year, content), prose_fts — for policy history, definitions, non-table data
+
+For CPI: use lookup_cpi(year). For prose/footnotes: prose_fts MATCH '<keyword>'.
+"""
+
+TOOL_SCHEMAS_MINIMAL: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_sql",
+            "description": "Execute a read-only SELECT query against ledger.sqlite. Always include WHERE table_id = <id> when querying metrics.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "SQL SELECT statement."},
+                    "limit": {"type": "integer", "description": "Max rows (default 100, max 200)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_cpi",
+            "description": "Return BLS CPI-U annual average for a year (1913–2024). Use for any inflation adjustment. To convert value V from year A to year B: V × (cpi_B / cpi_A).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "year": {"type": "integer", "description": "Year to look up."},
+                },
+                "required": ["year"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_answer",
+            "description": "Submit your final answer. Call this once you have verified the value.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "type": "string",
+                        "description": "The answer as a number or short string, e.g. '2602' or '3.5%'.",
+                    },
+                    "reasoning": {
+                        "type": "string",
+                        "description": "One sentence: table_id, metric_slug, year used.",
+                    },
+                },
+                "required": ["value", "reasoning"],
+            },
+        },
+    },
+]
+
+
+def solve_minimal(question: str, model: str | None = None, verbose: bool = False) -> dict:
+    """Minimal 3-tool SQL agent. All queries written by the model."""
+    model = model or DEFAULT_MODEL
+    client = _openai()
+    t0 = time.time()
+
+    messages: list[dict] = [
+        {"role": "system", "content": SYSTEM_SQL},
+        {"role": "user", "content": question},
+    ]
+    trace: list[dict] = []
+    total_tokens = 0
+
+    for step in range(MAX_ITERS):
+        tool_choice: Any = (
+            {"type": "tool", "name": "submit_answer"} if step == MAX_ITERS - 1 else "auto"
+        )
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=0,
+            messages=messages,  # type: ignore[arg-type]
+            tools=TOOL_SCHEMAS_MINIMAL,  # type: ignore[arg-type]
+            tool_choice=tool_choice,  # type: ignore[arg-type]
+        )
+        msg = resp.choices[0].message
+        if resp.usage:
+            total_tokens += resp.usage.total_tokens
+
+        assistant_msg: dict = {"role": "assistant", "content": msg.content or ""}
+        if msg.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,  # type: ignore[union-attr]
+                        "arguments": tc.function.arguments,  # type: ignore[union-attr]
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
+        messages.append(assistant_msg)
+
+        if not msg.tool_calls:
+            if step < MAX_ITERS - 2:
+                messages.append({"role": "user", "content": "Call submit_answer with your answer."})
+                continue
+            return {
+                "answer": msg.content or None,
+                "error": "no tool call",
+                "trace": trace,
+                "elapsed_s": time.time() - t0,
+                "token_count": total_tokens,
+            }
+
+        submitted: dict | None = None
+        for tc in msg.tool_calls:
+            name = tc.function.name  # type: ignore[union-attr]
+            try:
+                args = json.loads(tc.function.arguments or "{}")  # type: ignore[union-attr]
+            except json.JSONDecodeError:
+                args = {}
+
+            trace.append({"step": step, "tool": name, "args": args})
+
+            if verbose:
+                if name == "run_sql":
+                    q = (args.get("query") or "").replace("\n", " ")[:200]
+                    print(f"  [{step}] sql: {q}", flush=True)
+                else:
+                    print(f"  [{step}] {name}({json.dumps(args)[:80]})", flush=True)
+
+            if name == "submit_answer":
+                submitted = {
+                    "answer": str(args.get("value") or args.get("answer") or ""),
+                    "reasoning": args.get("reasoning", ""),
+                    "trace": trace,
+                    "elapsed_s": time.time() - t0,
+                    "token_count": total_tokens,
+                }
+                break
+
+            # dispatch
+            if name == "run_sql":
+                result = _tool_run_sql(str(args.get("query") or ""), int(args.get("limit", 100)))
+            elif name == "lookup_cpi":
+                result = _tool_lookup_cpi(int(args.get("year", 0)))
+            else:
+                result = {"error": f"unknown tool: {name}"}
+
+            trace[-1]["result_n"] = result.get("n") or ("error" if "error" in result else "ok")
+            touched = _extract_files_from_result(result)
+            if touched:
+                trace[-1]["files"] = sorted(touched)
+            if verbose:
+                if "error" in result:
+                    print(f"       → ERROR: {result['error'][:120]}", flush=True)
+                else:
+                    file_hint = f" files={sorted(touched)[:2]}" if touched else ""
+                    print(f"       → {result.get('n', 'ok')} rows{file_hint}", flush=True)
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result, default=str)[:8000],
+                }
+            )
+
+        if submitted:
+            return submitted
+
+    return {
+        "answer": None,
+        "error": "BUDGET_EXCEEDED",
+        "trace": trace,
+        "elapsed_s": time.time() - t0,
+        "token_count": total_tokens,
+    }
 
 
 # ── Tool schemas ────────────────────────────────────────────────────────────
@@ -500,6 +710,117 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                 },
                 "required": ["value", "reasoning"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lookup_cpi",
+            "description": (
+                "Return the BLS CPI-U annual average index for a given year (data available 1913–2024). "
+                "Use this for ANY question that asks you to adjust for inflation or convert between dollar years. "
+                "To convert a value V from year A to year B: multiply V × (CPI_B / CPI_A). "
+                "Do NOT use web_fetch for CPI — use this tool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "year": {
+                        "type": "integer",
+                        "description": "The year to look up (e.g. 1940, 1953).",
+                    },
+                },
+                "required": ["year"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_prose",
+            "description": (
+                "Full-text search over Treasury Bulletin narrative text passages and footnotes. "
+                "Use this for: (1) institutional history — bureau names, mergers, agency changes; "
+                "(2) methodology explanations — how a series is defined or revised; "
+                "(3) footnote content — what a dagger or asterisk on a table value means; "
+                "(4) any question that asks 'which bureau', 'what policy', 'what does X mean'. "
+                "Always try search_prose BEFORE concluding that information is not in the corpus."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keywords": {
+                        "type": "string",
+                        "description": "FTS5 search query. Use key terms, e.g. 'fiscal service merger public debt'.",
+                    },
+                    "file_year_min": {
+                        "type": "integer",
+                        "description": "Earliest bulletin year to search.",
+                    },
+                    "file_year_max": {
+                        "type": "integer",
+                        "description": "Latest bulletin year to search.",
+                    },
+                    "limit": {"type": "integer", "description": "Max results (default 15)."},
+                },
+                "required": ["keywords"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": (
+                "Fetch a URL and return its content. Use for external data the corpus does not contain: "
+                "FX exchange rates, CPI/inflation adjustments, current market data. "
+                "FX rates: https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@YYYY-MM-DD/v1/currencies/usd.json "
+                "(replace YYYY-MM-DD with the date you need, or 'latest' for current). "
+                "Do NOT guess exchange rates or CPI values — always fetch them."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full URL to fetch."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compute",
+            "description": (
+                "Run a statistical operation on a list of numbers. Use this when the question "
+                "asks for a derived statistic that SQL cannot express: geometric mean, harmonic mean, "
+                "stdev, median, linear regression, Pearson correlation, Gini coefficient, percent change, "
+                "Hodrick-Prescott filter output. "
+                "Pass ALL the data values you have retrieved — do not compute in your head."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "description": (
+                            "One of: sum, average, min, max, count, percent_change, stdev_sample, "
+                            "stdev_pop, median, geometric_mean, harmonic_mean, coefficient_of_variation, "
+                            "linear_regression, pearson_correlation, gini, percent_of, ratio, difference."
+                        ),
+                    },
+                    "values": {
+                        "type": "array",
+                        "items": {"type": "number"},
+                        "description": "The data values. For percent_change: [old, new]. For two-series ops: x-series here.",
+                    },
+                    "extra": {
+                        "type": "object",
+                        "description": 'Optional extra params. For linear_regression/pearson_correlation: {"y": [v1, v2, ...]}.',
+                    },
+                },
+                "required": ["operation", "values"],
             },
         },
     },
@@ -1005,6 +1326,262 @@ def _tool_run_sql(query: str, limit: int) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+def _tool_search_prose(
+    keywords: str, file_year_min: int | None, file_year_max: int | None, limit: int
+) -> dict:
+    """Full-text search over prose passages and footnotes."""
+    conn = _conn()
+    try:
+        # Escape FTS special chars
+        safe_kw = re.sub(r'["\*\(\)]', " ", keywords).strip()
+        if not safe_kw:
+            return {"error": "keywords required"}
+
+        year_filter = ""
+        yr_params: list = []
+        if file_year_min is not None:
+            year_filter += " AND p.file_year >= ?"
+            yr_params.append(file_year_min)
+        if file_year_max is not None:
+            year_filter += " AND p.file_year <= ?"
+            yr_params.append(file_year_max)
+
+        prose_rows = conn.execute(
+            f"SELECT p.file, p.file_year, p.section, p.content"
+            f" FROM prose p"
+            f" WHERE p.id IN (SELECT rowid FROM prose_fts WHERE prose_fts MATCH ?)"
+            f" {year_filter}"
+            f" ORDER BY p.file_year DESC LIMIT ?",
+            [safe_kw, *yr_params, min(limit, 20)],
+        ).fetchall()
+
+        fn_rows = conn.execute(
+            f"SELECT f.file, f.file_year, f.marker, f.content"
+            f" FROM footnotes f"
+            f" WHERE f.id IN (SELECT rowid FROM footnotes_fts WHERE footnotes_fts MATCH ?)"
+            f" {year_filter}"
+            f" ORDER BY f.file_year DESC LIMIT ?",
+            [safe_kw, *yr_params, min(limit, 10)],
+        ).fetchall()
+
+        results = [
+            {
+                "type": "prose",
+                "file": r["file"],
+                "file_year": r["file_year"],
+                "section": r["section"],
+                "content": r["content"][:500],
+            }
+            for r in prose_rows
+        ] + [
+            {
+                "type": "footnote",
+                "file": r["file"],
+                "file_year": r["file_year"],
+                "marker": r["marker"],
+                "content": r["content"][:500],
+            }
+            for r in fn_rows
+        ]
+        return {"results": results, "n": len(results)}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _tool_lookup_cpi(year: int) -> dict:
+    """Return BLS CPI-U annual average for a given year from the local cpi.py dataset."""
+    from cpi import annual_cpi
+
+    val = annual_cpi(int(year))
+    if val is None:
+        return {"error": f"No CPI-U data for year {year}. Available range: 1913–2024."}
+    return {
+        "year": year,
+        "cpi_u_annual_avg": val,
+        "source": "BLS CPI-U annual average (Minneapolis Fed / BLS series CUUR0000SA0)",
+        "note": "To convert value V from year A to year B: V × (cpi_B / cpi_A)",
+    }
+
+
+def _tool_web_fetch(url: str) -> dict:
+    """Fetch a URL and return its text content (for FX rates, CPI, external data)."""
+    import urllib.request
+
+    try:
+        url = url.strip()
+        if not url.startswith(("http://", "https://")):
+            return {"error": "url must start with http:// or https://"}
+        req = urllib.request.Request(url, headers={"User-Agent": "officeqa-agent/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read(65536)  # max 64KB
+        text = raw.decode("utf-8", errors="replace")
+        # If JSON, parse it
+        try:
+            data = json.loads(text)
+            return {"content_type": "json", "data": data}
+        except json.JSONDecodeError:
+            return {"content_type": "text", "text": text[:4000]}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _tool_compute(operation: str, values: list[float], extra: dict | None = None) -> dict:
+    """Run a named statistical operation on a list of numbers.
+
+    Self-contained — does not require the pipeline compute.py context.
+    For linear_regression/pearson_correlation, pass extra={"y": [...]} for the second series.
+    """
+    import math as _math
+    import statistics as _stats
+
+    _ALIASES = {
+        "mean": "average",
+        "avg": "average",
+        "arithmetic_mean": "average",
+        "std_dev": "stdev_sample",
+        "stdev": "stdev_sample",
+        "standard_deviation": "stdev_sample",
+        "linreg": "linear_regression",
+        "regression": "linear_regression",
+        "ols": "linear_regression",
+        "corr": "pearson_correlation",
+        "pearson": "pearson_correlation",
+        "cv": "coefficient_of_variation",
+        "geomean": "geometric_mean",
+        "geo_mean": "geometric_mean",
+        "pct_change": "percent_change",
+        "percent_difference": "percent_change",
+    }
+
+    op = _ALIASES.get(operation.strip().lower(), operation.strip().lower())
+    extra = extra or {}
+    xs = [float(v) for v in values if v is not None]
+
+    try:
+        if op == "sum":
+            result = sum(xs)
+        elif op == "average":
+            result = _stats.mean(xs)
+        elif op == "median":
+            result = _stats.median(xs)
+        elif op == "min":
+            result = min(xs)
+        elif op == "max":
+            result = max(xs)
+        elif op == "count":
+            result = len(xs)
+        elif op == "geometric_mean":
+            pos = [v for v in xs if v > 0]
+            if not pos:
+                return {"error": "geometric_mean: no positive values"}
+            result = _stats.geometric_mean(pos)
+        elif op == "harmonic_mean":
+            pos = [v for v in xs if v > 0]
+            if not pos:
+                return {"error": "harmonic_mean: no positive values"}
+            result = _stats.harmonic_mean(pos)
+        elif op == "stdev_sample":
+            if len(xs) < 2:
+                return {"error": "stdev_sample: need ≥2 values"}
+            result = _stats.stdev(xs)
+        elif op in ("stdev_pop", "stdev_population"):
+            result = _stats.pstdev(xs)
+        elif op == "coefficient_of_variation":
+            if len(xs) < 2:
+                return {"error": "cv: need ≥2 values"}
+            m = _stats.mean(xs)
+            result = _stats.stdev(xs) / m if m else float("inf")
+        elif op == "percent_change":
+            if len(xs) < 2:
+                return {"error": "percent_change: need [old, new]"}
+            old, new = xs[0], xs[1]
+            result = ((new - old) / old * 100) if old else float("inf")
+        elif op == "percent_of":
+            if len(xs) < 2:
+                return {"error": "percent_of: need [part, whole]"}
+            result = xs[0] / xs[1] * 100 if xs[1] else float("inf")
+        elif op == "ratio":
+            if len(xs) < 2:
+                return {"error": "ratio: need [numerator, denominator]"}
+            result = xs[0] / xs[1] if xs[1] else float("inf")
+        elif op == "difference":
+            if len(xs) < 2:
+                return {"error": "difference: need [a, b]"}
+            result = xs[0] - xs[1]
+        elif op == "gini":
+            s = sorted(xs)
+            n = len(s)
+            total = sum(s)
+            if not total or not n:
+                return {"error": "gini: all zeros"}
+            result = (2 * sum((i + 1) * v for i, v in enumerate(s)) / (n * total)) - (n + 1) / n
+        elif op in ("linear_regression", "pearson_correlation"):
+            ys = [float(v) for v in (extra.get("y") or []) if v is not None]
+            if len(xs) != len(ys) or len(xs) < 2:
+                return {
+                    "error": f"{op}: need equal-length x and y series with ≥2 points; got x={len(xs)}, y={len(ys)}"
+                }
+            n = len(xs)
+            mx, my = sum(xs) / n, sum(ys) / n
+            ss_xx = sum((x - mx) ** 2 for x in xs)
+            ss_yy = sum((y - my) ** 2 for y in ys)
+            ss_xy = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=False))
+            if op == "pearson_correlation":
+                result = ss_xy / _math.sqrt(ss_xx * ss_yy) if ss_xx and ss_yy else 0.0
+            else:  # linear_regression
+                slope = ss_xy / ss_xx if ss_xx else 0.0
+                intercept = my - slope * mx
+                result = {"slope": round(slope, 6), "intercept": round(intercept, 6)}
+        else:
+            ops = [
+                "sum",
+                "average",
+                "median",
+                "min",
+                "max",
+                "count",
+                "geometric_mean",
+                "harmonic_mean",
+                "stdev_sample",
+                "stdev_pop",
+                "coefficient_of_variation",
+                "percent_change",
+                "percent_of",
+                "ratio",
+                "difference",
+                "gini",
+                "linear_regression",
+                "pearson_correlation",
+            ]
+            return {"error": f"unknown operation {operation!r}. Available: {ops}"}
+
+        return {"operation": op, "result": result, "n": len(xs)}
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _extract_files_from_result(result: dict) -> set[str]:
+    """Pull source file names out of a tool result for retrieval tracking."""
+    files: set[str] = set()
+    # lookup_metric / browse_rows return {"rows": [{..., "file": "treasury_bulletin_..."}]}
+    for row in result.get("rows") or []:
+        if isinstance(row, dict) and row.get("file"):
+            f = str(row["file"]).removesuffix(".json").removesuffix(".txt")
+            files.add(f)
+    # run_sql returns {"columns": [...], "rows": [[...]]}; look for a "file" column
+    cols = result.get("columns") or []
+    try:
+        file_idx = cols.index("file")
+        for row in result.get("rows") or []:
+            if isinstance(row, (list, tuple)) and len(row) > file_idx:
+                f = str(row[file_idx]).removesuffix(".json").removesuffix(".txt")
+                if f.startswith("treasury_bulletin_"):
+                    files.add(f)
+    except (ValueError, TypeError):
+        pass
+    return files
+
+
 def _dispatch(name: str, args: dict) -> dict:
     if name == "lookup_metric":
         kw = str(args.get("keywords") or "")
@@ -1073,7 +1650,82 @@ def _dispatch(name: str, args: dict) -> dict:
     if name == "run_sql":
         query = str(args.get("query") or args.get("sql") or "")
         return _tool_run_sql(query, int(args.get("limit", 100)))
+    if name == "search_prose":
+        return _tool_search_prose(
+            keywords=str(args.get("keywords") or args.get("query") or ""),
+            file_year_min=int(args["file_year_min"]) if args.get("file_year_min") else None,
+            file_year_max=int(args["file_year_max"]) if args.get("file_year_max") else None,
+            limit=int(args.get("limit", 15)),
+        )
+    if name == "lookup_cpi":
+        year = args.get("year")
+        if year is None:
+            return {"error": "year parameter is required"}
+        return _tool_lookup_cpi(int(year))
+    if name == "web_fetch":
+        return _tool_web_fetch(str(args.get("url") or ""))
+    if name == "compute":
+        vals = args.get("values") or []
+        return _tool_compute(
+            operation=str(args.get("operation") or ""),
+            values=[float(v) for v in vals],
+            extra=args.get("extra"),
+        )
     return {"error": f"unknown tool: {name}"}
+
+
+# ── Submission verification ─────────────────────────────────────────────────
+
+
+def _verify_submission(answer: str, source_values: list, operation: str) -> str | None:
+    """Recompute the answer from source_values and operation. Returns error string or None."""
+    import math
+    import statistics
+
+    if not source_values or operation in ("single", "other", ""):
+        return None  # can't verify without values or with unknown operation
+
+    try:
+        vals = [float(v) for v in source_values]
+    except (TypeError, ValueError):
+        return None  # malformed values — skip verification
+
+    try:
+        answer_num = float(answer.replace(",", "").replace("%", ""))
+    except (ValueError, AttributeError):
+        return None  # non-numeric answer — skip
+
+    computed: float | None = None
+    if operation == "sum":
+        computed = sum(vals)
+    elif operation in ("mean", "average"):
+        computed = statistics.mean(vals)
+    elif operation == "geometric_mean":
+        if any(v <= 0 for v in vals):
+            return None
+        computed = math.exp(sum(math.log(v) for v in vals) / len(vals))
+    elif operation == "percent_change":
+        if len(vals) == 2 and vals[0] != 0:
+            computed = (vals[1] - vals[0]) / abs(vals[0]) * 100
+    elif operation == "difference":
+        if len(vals) == 2:
+            computed = vals[1] - vals[0]
+    elif operation == "ratio":
+        if len(vals) == 2 and vals[1] != 0:
+            computed = vals[0] / vals[1]
+
+    if computed is None:
+        return None
+
+    # Allow 1% relative tolerance or 0.01 absolute
+    tol = max(abs(computed) * 0.01, 0.01)
+    if abs(computed - answer_num) > tol:
+        return (
+            f"Verification failed: your source_values ({len(vals)} values) compute to "
+            f"{computed:.4f} via '{operation}', but you submitted '{answer}'. "
+            f"Recheck your values or computation."
+        )
+    return None
 
 
 # ── Agent loop ──────────────────────────────────────────────────────────────
@@ -1180,8 +1832,9 @@ def solve(
                     print(f"  [{step}] {name}({json.dumps(args)[:100]})", flush=True)
 
             if name == "submit_answer":
+                raw_answer = str(args.get("value") or args.get("answer") or "")
                 submitted = {
-                    "answer": str(args.get("value") or args.get("answer") or ""),
+                    "answer": raw_answer,
                     "unit": args.get("unit"),
                     "reasoning": args.get("reasoning", ""),
                     "trace": trace,
@@ -1192,11 +1845,16 @@ def solve(
 
             result = _dispatch(name, args)
             trace[-1]["result_n"] = result.get("n") or ("error" if "error" in result else "ok")
+            # Track which source files were touched (for retrieval recall measurement)
+            touched = _extract_files_from_result(result)
+            if touched:
+                trace[-1]["files"] = sorted(touched)
             if verbose:
                 if "error" in result:
                     print(f"       → ERROR: {result['error'][:120]}", flush=True)
                 else:
-                    print(f"       → {result.get('n', 'ok')} rows", flush=True)
+                    file_hint = f" files={sorted(touched)[:3]}" if touched else ""
+                    print(f"       → {result.get('n', 'ok')} rows{file_hint}", flush=True)
             messages.append(
                 {
                     "role": "tool",
@@ -1263,7 +1921,10 @@ def run_eval(
             question = row["question"]
             gold = row["answer"]
 
-            result = solve(question, variant=variant, model=model, verbose=verbose)
+            if variant == "sql":
+                result = solve_minimal(question, model=model, verbose=verbose)
+            else:
+                result = solve(question, variant=variant, model=model, verbose=verbose)
             answer = result.get("answer") or ""
 
             try:
@@ -1275,12 +1936,28 @@ def run_eval(
             if is_correct:
                 correct += 1
 
+            # Collect all files accessed across tool calls
+            files_accessed = sorted(
+                {f for step in result.get("trace", []) for f in (step.get("files") or [])}
+            )
+            gold_source_files = [
+                s.removesuffix(".json").removesuffix(".txt").strip()
+                for s in row.get("source_files", "").split("|")
+                if s.strip()
+            ]
+            gold_file_hit = bool(
+                gold_source_files and any(g in files_accessed for g in gold_source_files)
+            )
+
             record = {
                 "uid": uid,
                 "question": question,
                 "gold": gold,
                 "answer": answer,
                 "correct": is_correct,
+                "gold_file_hit": gold_file_hit,
+                "gold_source_files": gold_source_files,
+                "files_accessed": files_accessed,
                 "unit": result.get("unit"),
                 "reasoning": result.get("reasoning")
                 or (result.get("trace") or [{}])[-1:][0].get("args", {}).get("reasoning"),
@@ -1292,18 +1969,24 @@ def run_eval(
             out_f.write(json.dumps(record) + "\n")
             out_f.flush()
 
+            file_mark = "F" if gold_file_hit else "f"
             mark = "✓" if is_correct else "✗"
             print(
-                f"{mark} [{uid}] {answer!r:<20} gold={gold!r} "
-                f"({result.get('elapsed_s', 0):.1f}s, {result.get('token_count', 0)} tok)",
+                f"{mark}{file_mark} [{uid}] {answer!r:<20} gold={gold!r} "
+                f"files={len(files_accessed)} ({result.get('elapsed_s', 0):.1f}s, {result.get('token_count', 0)} tok)",
                 flush=True,
             )
 
     accuracy = correct / total if total else 0
+    # Re-read JSONL to compute file recall stats
+    with open(out_path) as _fh:
+        file_hits = sum(1 for line in _fh if json.loads(line).get("gold_file_hit"))
     summary = {
         "n": total,
         "correct": correct,
         "accuracy": accuracy,
+        "gold_file_hit": file_hits,
+        "file_recall": round(file_hits / total, 3) if total else 0,
         "variant": variant,
         "model": model or DEFAULT_MODEL,
     }
@@ -1325,9 +2008,9 @@ def main() -> None:
     parser.add_argument("--uids", type=str, default=None, help="Comma-separated UIDs to eval")
     parser.add_argument(
         "--variant",
-        choices=["plain", "think", "minimal", "both"],
+        choices=["plain", "think", "minimal", "both", "sql"],
         default="plain",
-        help="plain (default), think, minimal (bare schema only), or both",
+        help="plain, think, minimal, sql (3-tool minimal SQL agent), or both",
     )
     parser.add_argument(
         "--model",
@@ -1367,7 +2050,10 @@ def main() -> None:
     if not args.question:
         parser.error("provide a question or use --eval")
 
-    result = solve(args.question, variant=args.variant, model=args.model)
+    if args.variant == "sql":
+        result = solve_minimal(args.question, model=args.model, verbose=args.verbose)
+    else:
+        result = solve(args.question, variant=args.variant, model=args.model)
     if args.verbose:
         for t in result.get("trace", []):
             print(f"  [{t['step']}] {t['tool']}({json.dumps(t['args'])[:120]})")

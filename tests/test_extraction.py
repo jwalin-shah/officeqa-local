@@ -567,9 +567,9 @@ def test_fast_path_all_resolve_annual():
     # Mock: _get_table_id_from_entry returns 42, _build_cells_for_dr builds one cell,
     # resolve_cells returns a resolved value
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("find._get_table_id_from_entry", return_value=42),
         patch(
-            "solve._build_cells_for_dr",
+            "find._build_cells_for_dr",
             return_value=[{"row_leaf": "National defense", "col_leaf": "1940", "name": "v1"}],
         ),
         patch("find.resolve_cells") as mock_resolve,
@@ -599,9 +599,9 @@ def test_fast_path_partial_resolve_falls_back():
     per_dr = {"v1": entries}
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("find._get_table_id_from_entry", return_value=42),
         patch(
-            "solve._build_cells_for_dr",
+            "find._build_cells_for_dr",
             return_value=[{"row_leaf": "National defense", "col_leaf": "1940", "name": "v1"}],
         ),
         patch("find.resolve_cells") as mock_resolve,
@@ -698,7 +698,7 @@ def test_fast_path_table_id_not_found():
     entries = [_make_table_entry(table_id=42)]
     per_dr = {"v1": entries}
 
-    with patch("solve._get_table_id_from_entry", return_value=None):
+    with patch("find._get_table_id_from_entry", return_value=None):
         result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
     resolved, unresolved_ids = result
@@ -715,8 +715,8 @@ def test_fast_path_cant_build_cells():
     per_dr = {"v1": entries}
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
-        patch("solve._build_cells_for_dr", return_value=None),
+        patch("find._get_table_id_from_entry", return_value=42),
+        patch("find._build_cells_for_dr", return_value=None),
     ):
         result = try_deterministic_fast_path(spec, per_dr, verbose=True)
 
@@ -735,8 +735,8 @@ def test_fast_path_multi_dr_all_resolve():
     per_dr = {"v1": entries, "v2": entries}
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
-        patch("solve._build_cells_for_dr") as mock_build,
+        patch("find._get_table_id_from_entry", return_value=42),
+        patch("find._build_cells_for_dr") as mock_build,
         patch("find.resolve_cells") as mock_resolve,
     ):
         # First call for v1, second for v2
@@ -766,8 +766,8 @@ def test_fast_path_multi_dr_partial_fails():
     per_dr = {"v1": entries, "v2": entries}
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
-        patch("solve._build_cells_for_dr") as mock_build,
+        patch("find._get_table_id_from_entry", return_value=42),
+        patch("find._build_cells_for_dr") as mock_build,
         patch("find.resolve_cells") as mock_resolve,
     ):
         mock_build.side_effect = [
@@ -804,8 +804,8 @@ def test_fast_path_monthly_all_resolve():
     monthly_values = {f"m{m:02d}": float(m * 100) for m in range(1, 13)}
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
-        patch("solve._build_cells_for_dr", return_value=monthly_cells),
+        patch("find._get_table_id_from_entry", return_value=42),
+        patch("find._build_cells_for_dr", return_value=monthly_cells),
         patch("find.resolve_cells") as mock_resolve,
     ):
         mock_resolve.return_value = {"values": monthly_values, "debug": {}}
@@ -834,8 +834,8 @@ def test_fast_path_monthly_incomplete_fails():
     incomplete_values = {f"m{m:02d}": float(m * 100) for m in range(1, 11)}
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
-        patch("solve._build_cells_for_dr", return_value=incomplete_cells),
+        patch("find._get_table_id_from_entry", return_value=42),
+        patch("find._build_cells_for_dr", return_value=incomplete_cells),
         patch("find.resolve_cells") as mock_resolve,
     ):
         mock_resolve.return_value = {"values": incomplete_values, "debug": {}}
@@ -1140,16 +1140,16 @@ def test_fast_path_bottomup_called_with_keyword_when_row_hint_empty():
     }
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("find._get_table_id_from_entry", return_value=42),
         patch(
-            "solve._build_cells_for_dr",
+            "find._build_cells_for_dr",
             return_value=[{"row_leaf": "", "col_leaf": "", "name": "v1"}],
         ),
         patch(
-            "solve.resolve_cells",
+            "find.resolve_cells",
             return_value={"values": {"v1": None}, "debug": {"v1": {"status": "label_miss"}}},
         ),
-        patch("solve.search_cells_bottomup") as mock_bu,
+        patch("find.search_cells_bottomup") as mock_bu,
     ):
         mock_bu.return_value = [bu_hit]
         resolved, unresolved = try_deterministic_fast_path(spec, per_dr, verbose=False)
@@ -1185,16 +1185,16 @@ def test_fast_path_bottomup_called_with_label_when_row_hint_and_keywords_empty()
     }
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("find._get_table_id_from_entry", return_value=42),
         patch(
-            "solve._build_cells_for_dr",
+            "find._build_cells_for_dr",
             return_value=[{"row_leaf": "", "col_leaf": "", "name": "v1"}],
         ),
         patch(
-            "solve.resolve_cells",
+            "find.resolve_cells",
             return_value={"values": {"v1": None}, "debug": {"v1": {"status": "label_miss"}}},
         ),
-        patch("solve.search_cells_bottomup") as mock_bu,
+        patch("find.search_cells_bottomup") as mock_bu,
     ):
         mock_bu.return_value = [bu_hit]
         resolved, unresolved = try_deterministic_fast_path(spec, per_dr, verbose=False)
@@ -1852,8 +1852,8 @@ def test_fast_path_partial_returns_resolved_and_unresolved():
     per_dr = {"v1": entries, "v2": entries}
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
-        patch("solve._build_cells_for_dr") as mock_build,
+        patch("find._get_table_id_from_entry", return_value=42),
+        patch("find._build_cells_for_dr") as mock_build,
         patch("find.resolve_cells") as mock_resolve,
     ):
         mock_build.side_effect = [
@@ -1886,9 +1886,9 @@ def test_fast_path_partial_external_source_dr():
     per_dr = {"v1": entries, "v2": entries}
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("find._get_table_id_from_entry", return_value=42),
         patch(
-            "solve._build_cells_for_dr",
+            "find._build_cells_for_dr",
             return_value=[{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
         ),
         patch("find.resolve_cells") as mock_resolve,
@@ -1914,9 +1914,9 @@ def test_fast_path_partial_no_entries_for_one_dr():
     per_dr = {"v1": entries, "v2": []}  # v2 has no entries
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
+        patch("find._get_table_id_from_entry", return_value=42),
         patch(
-            "solve._build_cells_for_dr",
+            "find._build_cells_for_dr",
             return_value=[{"row_leaf": "National defense", "col_leaf": "1938", "name": "v1"}],
         ),
         patch("find.resolve_cells") as mock_resolve,
@@ -1942,8 +1942,8 @@ def test_fast_path_all_resolve_returns_empty_unresolved():
     per_dr = {"v1": entries, "v2": entries}
 
     with (
-        patch("solve._get_table_id_from_entry", return_value=42),
-        patch("solve._build_cells_for_dr") as mock_build,
+        patch("find._get_table_id_from_entry", return_value=42),
+        patch("find._build_cells_for_dr") as mock_build,
         patch("find.resolve_cells") as mock_resolve,
     ):
         mock_build.side_effect = [

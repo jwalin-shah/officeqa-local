@@ -2133,6 +2133,106 @@ def build_fts_index(conn: sqlite3.Connection) -> None:
     )
 
 
+def build_family_tables(conn: sqlite3.Connection) -> None:
+    """Build table_family* tables and families_fts index.
+
+    Groups tables by LOWER(title) as family_id (same grouping as original
+    migration). Populates family_years from facts.data_year so year coverage
+    is broad (includes row-extracted years, not just col-extracted years).
+    """
+    import time as _time
+
+    t0 = _time.time()
+    print("\n─── Family tables ──────────────────────────────────────────")
+
+    # Ensure tables.family_id column exists
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(tables)").fetchall()]
+    if "family_id" not in cols:
+        conn.execute("ALTER TABLE tables ADD COLUMN family_id TEXT")
+    conn.execute("UPDATE tables SET family_id = LOWER(TRIM(COALESCE(title, '')))")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tables_family ON tables(family_id)")
+
+    conn.executescript("""
+        DROP TABLE IF EXISTS table_families;
+        DROP TABLE IF EXISTS table_family_columns;
+        DROP TABLE IF EXISTS table_family_rows;
+        DROP TABLE IF EXISTS table_family_years;
+        DROP TABLE IF EXISTS families_fts;
+
+        CREATE TABLE table_families(
+            family_id TEXT, primary_title TEXT,
+            member_count INTEGER, latest_ver INTEGER, latest_table_id INTEGER
+        );
+        CREATE INDEX idx_families_fid    ON table_families(family_id);
+        CREATE INDEX idx_families_latest ON table_families(latest_table_id);
+
+        CREATE TABLE table_family_columns(family_id TEXT, col_leaf_lower TEXT);
+        CREATE INDEX idx_family_columns_fid   ON table_family_columns(family_id);
+        CREATE INDEX idx_family_columns_lower ON table_family_columns(col_leaf_lower);
+
+        CREATE TABLE table_family_rows(family_id TEXT, metric_slug TEXT);
+        CREATE INDEX idx_family_rows_fid  ON table_family_rows(family_id);
+        CREATE INDEX idx_family_rows_slug ON table_family_rows(metric_slug);
+
+        CREATE TABLE table_family_years(family_id TEXT, year INT, best_table_id INT);
+        CREATE INDEX idx_family_years_fid      ON table_family_years(family_id);
+        CREATE INDEX idx_family_years_year     ON table_family_years(year);
+        CREATE INDEX idx_family_years_fid_year ON table_family_years(family_id, year);
+        CREATE INDEX idx_family_years_best     ON table_family_years(best_table_id);
+    """)
+
+    conn.execute("""
+        INSERT INTO table_families(family_id, primary_title, member_count, latest_ver, latest_table_id)
+        SELECT family_id,
+            (SELECT title FROM tables t2 WHERE t2.family_id = t.family_id
+             ORDER BY t2.file_year DESC, t2.file_month DESC, t2.id DESC LIMIT 1),
+            COUNT(*),
+            MAX(file_year * 100 + COALESCE(file_month, 0)),
+            (SELECT id FROM tables t3 WHERE t3.family_id = t.family_id
+             ORDER BY t3.file_year DESC, t3.file_month DESC, t3.id DESC LIMIT 1)
+        FROM tables t WHERE family_id IS NOT NULL AND family_id != '' GROUP BY family_id
+    """)
+
+    conn.execute("""
+        INSERT INTO table_family_columns(family_id, col_leaf_lower)
+        SELECT DISTINCT t.family_id, LOWER(TRIM(tc.col_leaf))
+        FROM table_columns tc JOIN tables t ON t.id = tc.table_id
+        WHERE t.family_id IS NOT NULL AND t.family_id != ''
+          AND tc.col_leaf IS NOT NULL AND TRIM(tc.col_leaf) != ''
+    """)
+
+    conn.execute("""
+        INSERT INTO table_family_rows(family_id, metric_slug)
+        SELECT DISTINCT t.family_id, tr.metric_slug
+        FROM table_rows tr JOIN tables t ON t.id = tr.table_id
+        WHERE t.family_id IS NOT NULL AND t.family_id != ''
+          AND tr.metric_slug IS NOT NULL AND TRIM(tr.metric_slug) != ''
+    """)
+
+    conn.execute("""
+        INSERT INTO table_family_years(family_id, year, best_table_id)
+        SELECT tf.family_id, f.data_year,
+            (SELECT t2.id FROM tables t2 JOIN facts f2 ON f2.table_id = t2.id
+             WHERE t2.family_id = tf.family_id AND f2.data_year = f.data_year
+             ORDER BY t2.file_year DESC, t2.file_month DESC, t2.id DESC LIMIT 1)
+        FROM facts f JOIN tables tf ON tf.id = f.table_id
+        WHERE tf.family_id IS NOT NULL AND tf.family_id != '' AND f.data_year IS NOT NULL
+        GROUP BY tf.family_id, f.data_year
+    """)
+
+    conn.executescript("""
+        CREATE VIRTUAL TABLE families_fts USING fts5(
+            family_id UNINDEXED, primary_title, tokenize = 'unicode61'
+        );
+        INSERT INTO families_fts(family_id, primary_title)
+        SELECT family_id, COALESCE(primary_title, '') FROM table_families;
+    """)
+
+    fam = conn.execute("SELECT COUNT(*) FROM table_families").fetchone()[0]
+    yr = conn.execute("SELECT COUNT(*) FROM table_family_years").fetchone()[0]
+    print(f"  {fam:,} families, {yr:,} family-year pairs in {_time.time() - t0:.1f}s", flush=True)
+
+
 def run_sanity_checks(conn: sqlite3.Connection) -> None:
     print("\n─── Sanity checks ─────────────────────────────────────────")
     queries = [
@@ -2285,6 +2385,7 @@ def build(limit: int = 0, rebuild: bool = False, ledger_path: Path | None = None
 
     build_metric_layer(conn)
     build_fts_index(conn)
+    build_family_tables(conn)
     run_sanity_checks(conn)
     conn.close()
 

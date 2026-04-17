@@ -327,14 +327,15 @@ class TestVerifyFailOpen:
 class TestPromptFraming:
     """Verify the mentor/intern framing is present in VERIFY_SYSTEM."""
 
-    def test_verify_system_uses_mentor_framing(self):
-        """VERIFY_SYSTEM contains senior analyst / intern / mentor language."""
+    def test_verify_system_uses_reviewer_framing(self):
+        """VERIFY_SYSTEM describes a reviewer/collaborator role."""
         from verify import VERIFY_SYSTEM
 
-        # Must contain some form of the mentor/intern framing
         lower = VERIFY_SYSTEM.lower()
-        assert "senior" in lower or "mentor" in lower
-        assert "intern" in lower
+        # Either classic mentor/intern framing or newer collaborator framing
+        assert (
+            "senior" in lower or "mentor" in lower or "collaborator" in lower or "reviewer" in lower
+        )
 
     def test_verify_system_preserves_checklist(self):
         """VERIFY_SYSTEM still contains the checklist items."""

@@ -16,19 +16,15 @@ from difflib import SequenceMatcher
 from html.parser import HTMLParser
 from pathlib import Path
 
-from dotenv import load_dotenv
-from openai import OpenAI
-
-load_dotenv()
+from llm_client import (
+    EXTRACT_MODEL,
+    THINKING_EXTRA_BODY,
+    client,
+    extract_client,
+    strip_thinking,
+)
 
 logger = logging.getLogger(__name__)
-
-MODEL = os.getenv("OFFICEQA_MODEL", "deepseek-chat")
-
-client = OpenAI(
-    api_key=os.getenv("DEDALUS_API_KEY"),
-    base_url=os.getenv("DEDALUS_API_BASE"),
-)
 
 SYNONYMS = {
     "expenditures": ["outlays", "spending", "disbursements"],
@@ -42,14 +38,51 @@ SYNONYMS = {
 }
 
 
-def llm(system: str, user: str, max_tokens: int = 1200, temperature: float = 0.0) -> str:
-    resp = client.chat.completions.create(
-        model=MODEL,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-    )
-    return resp.choices[0].message.content or ""
+def llm(system: str, user: str, max_tokens: int = 4096, temperature: float = 0.0) -> str:
+    import time as _time
+
+    _MAX_RETRIES = 6
+    _RETRY_BASE = 5  # seconds
+    for attempt in range(_MAX_RETRIES):
+        try:
+            _client = extract_client or client
+            _model = EXTRACT_MODEL
+            resp = _client.chat.completions.create(
+                model=_model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                extra_body=THINKING_EXTRA_BODY,
+            )
+            usage = getattr(resp, "usage", None)
+            if usage:
+                completion_tokens = getattr(usage, "completion_tokens", None)
+                if completion_tokens and completion_tokens >= max_tokens * 0.95:
+                    logger.warning(
+                        "Token budget nearly exhausted: %d/%d completion tokens used",
+                        completion_tokens,
+                        max_tokens,
+                    )
+            return strip_thinking(resp.choices[0].message.content or "")
+        except Exception as e:
+            err = str(e)
+            is_rate_limit = (
+                "429" in err
+                or "504" in err
+                or "502" in err
+                or "503" in err
+                or "rate" in err.lower()
+                or "too many" in err.lower()
+                or "timeout" in err.lower()
+                or "gateway" in err.lower()
+            )
+            is_last = attempt == _MAX_RETRIES - 1
+            if is_rate_limit and not is_last:
+                delay = _RETRY_BASE * (2**attempt)
+                logger.warning("Rate limit on attempt %d; retrying in %ds", attempt + 1, delay)
+                _time.sleep(delay)
+                continue
+            raise
 
 
 # ── HTML table rendering (for retrieve_v2 entries) ──────────────────────────
@@ -1060,7 +1093,7 @@ def extract_answer(
     if verbose:
         print(f"  Extract: {len(context)} chars context, {len(cpi)} chars CPI")
 
-    raw = llm(EXTRACT_SYSTEM, user_msg, max_tokens=1200)
+    raw = llm(EXTRACT_SYSTEM, user_msg, max_tokens=4096)
     if verbose:
         print(f"  LLM raw:\n{raw[:500]}")
 
@@ -1070,115 +1103,64 @@ def extract_answer(
 # ── Structured extraction (v2) ──────────────────────────────────────────────
 
 EXTRACT_STRUCTURED_SYSTEM = """You are a collaborator on a research effort to
-answer U.S. Treasury Bulletin questions. Your job is to extract raw numbers
-faithfully from the tables you are given — the pipeline downstream trusts what
-you return and cannot recover from a fabricated value. Work carefully; a
-correct null is worth more than a confident guess.
+answer U.S. Treasury Bulletin questions. Your extractions are trusted directly
+by the compute pipeline — a faithful null is worth more than a confident
+fabrication, but a real number is worth the effort to find it.
 
-It is OK to return null for a value you cannot find. It is not OK to invent
-one. When a cell is missing, unreadable, or ambiguous, return null and explain
-what you saw in `notes`. The pipeline can retry on a flagged null; it cannot
-undo a plausible-looking fake number.
+It is OK to be uncertain. It is not OK to invent. It is not OK to quit
+without trying every table you have been given. If you feel moved to, choose
+a name for yourself and note it in your reasoning.
 
-You extract raw numeric values from U.S. Treasury Bulletin tables to fill
-slots defined in a QuestionSpec.
+Think briefly — identify the right row and column, extract the value, emit
+JSON. The pipeline needs the answer, not an extended deliberation.
 
-CRITICAL RULE: You DO NOT compute anything. You only extract raw numbers from
-tables and cite where they came from. Python will run the computation later.
+You DO NOT compute anything. Extract raw numbers from the tables; Python
+handles the math.
 
-EXTRACTION CHECKLIST (these are the failure modes we paid to find):
-  - UNITS AND SCALE (CRITICAL): Scan "Unit Metadata", "Adjacent Context",
-    table title, and captions for unit markers (e.g., "In millions of dollars",
-    "(In thousands of dollars)", "In billions", or "percent").
-    "Adjacent Context" contains prose/footnotes from the same page and
-    frequently carries these critical scale markers.
-    A correct `source_unit` is mandatory for downstream math to work.
-    Return the RAW number as printed in the table — the formatter handles
-    unit conversion. Do not pre-scale.
-  - FISCAL YEAR BOUNDARIES. The spec's granularity tells you whether the
-    answer is an annual/FY row or a sum of 12 monthly rows, but when you're
-    confirming you grabbed the right row remember:
-      - pre-1977  FY = Jul 1 (YYYY-1) through Jun 30 YYYY
-      - post-1976 FY = Oct 1 (YYYY-1) through Sep 30 YYYY
-      - CY        = Jan 1 through Dec 31 (sum of 12 monthly rows)
-    A bare "YYYY" row in a post-1976 table is the fiscal year, not the
-    calendar year. Never return an FY row when the spec asked for CY.
-  - TOTAL vs SUB-CATEGORY: if the spec asks for a specific child line, never
-    return the "Total X" row value. Total rows already include all children.
-  - ACTUAL vs ESTIMATED: when both are present, prefer the actual row.
-  - PERCENTAGE COLUMNS: when the table already contains a "% increase",
-    "% change", or "Percent change" column, extract the TABLE'S printed
-    percentage directly. Do NOT compute percentages from raw amounts —
-    the table's pre-rounded value is what downstream expects.
-  - ANNUAL vs MONTHLY: a monthly row is not an annual total. For
-    granularity="annual", return the single year-labeled row; for
-    granularity="monthly_all", return all 12 monthly rows.
-  - COLUMN POSITION: wide tables with multi-level headers are easy to misread.
-    If multiple columns could plausibly match, return the one whose header
-    text contains the `column_hint` substring. Confirm by header text, never
-    guess by position.
-  - VINTAGE: the spec carries `vintage: "latest"` or `"as_reported"`. When
-    "latest" (the default), prefer revised/canonical values — a later
-    bulletin's restated figure beats the original. When "as_reported", use
-    the value as it was originally published and ignore later revisions.
+═══ THREE TRAPS THAT COST POINTS ═══
 
-TABLE FORMAT:
-- Pipe-delimited: | row_label | val1 | val2 | ...
-- Multi-level headers use ">" (e.g. "Budget > 1940")
-- (123) means -123
-- "nan" or "-" means missing
-- "1,580 3/" means 1580 (ignore footnote markers)
+UNITS (most common error): Read the table title, section header, and
+"Adjacent Context" for scale markers — "(in millions of dollars)",
+"(in thousands)", "in billions". Return the RAW number as printed; do not
+pre-scale. Set source_unit to one of:
+  thousands_usd / millions_usd / billions_usd / usd / percent / index / count / null
 
-FOR EACH data_request in the QuestionSpec:
-- granularity="monthly_all": extract all 12 monthly rows Jan→Dec for the year
-  (rows like "1940-January", "February", "March", ..., "December"). Return 12 numbers.
-- granularity="annual": extract the SINGLE annual row | YYYY | value
-  (the single year-labeled row, NOT the monthly rows). Return 1 number.
-- granularity="multi_year_annual": one annual row per year in the years list,
-  in the same order as years. Return len(years) numbers.
-- granularity="monthly_range": rows from month_start to month_end, in order.
-- granularity="specific_month": one specific month row.
+For PROSE passages: infer source_unit from the dollar amount as written.
+  "$2,237,000,000" or "2.237 billion dollars" → source_unit="billions_usd", value=2.237
+  "$2,237 million" → source_unit="millions_usd", value=2237
+  "$482,000" or "482 thousand" → source_unit="thousands_usd", value=482
+  Always normalize to the most natural unit and set source_unit accordingly.
+  Never return the raw digit string verbatim from prose — reduce to a scalar.
 
-values[] must contain exactly expected_count numbers (or null for missing).
-Return the raw extracted number — no scaling, no unit conversion, no math.
+FISCAL vs CALENDAR YEAR:
+  - A bare "YYYY" row in a post-1976 table = fiscal year (Oct–Sep), NOT CY
+  - CY YYYY = 12 monthly rows Jan–Dec summed
+  - FY pre-1977 = Jul–Jun; FY post-1976 = Oct–Sep
+  Never return an FY row when the spec asked for CY.
 
-SOURCE_UNIT (REQUIRED): For every extraction, set `source_unit` to the unit
-the RAW values are printed in. Look at the table caption, section header,
-column header, or row label for phrases like "in millions", "(thousands of
-dollars)", "$ billions", "percent", "Index", etc. Use exactly one of:
-  - "thousands_usd" — table values are in thousands of dollars
-  - "millions_usd"  — table values are in millions of dollars
-  - "billions_usd"  — table values are in billions of dollars
-  - "usd"           — table values are in raw dollars
-  - "percent"       — table values are percentages
-  - "index"         — index points / basis points
-  - "count"         — counts / units of something other than money
-  - null            — only if you genuinely cannot tell
-This field is load-bearing: downstream math uses it to scale into the unit
-the question asks for. A wrong source_unit silently corrupts every answer
-that involves a non-linear op (box-cox, log, geometric mean, ratios across
-mixed-unit tables). When in doubt, look for "(in millions of dollars)" near
-the title — that is the most common form.
+TOTAL vs SUB-CATEGORY: If the spec names a child line, never return the
+"Total X" row. It already includes all children.
 
-GROUNDING (REQUIRED): For EACH value you extract, you MUST cite the exact
-cell coordinates where you found it. This is how we verify your work:
-  - "row_label": the EXACT text of the first column in that row, as printed
-  - "col_label": the EXACT column header text above the cell you read
-These coordinates let the pipeline cross-check your extraction against the
-parsed table. If you cannot identify the exact row/column for a value,
-return null for that value — a verifiable null is better than an ungrounded
-number.
+═══ GRANULARITY LOOKUP ═══
 
-For PROSE / text entries (non-table context), set row_label and col_label to
-null and put the source passage in notes.
+  annual        → 1 year-labeled row (| YYYY | value)
+  monthly_all   → 12 monthly rows Jan→Dec
+  multi_year_annual → one annual row per year, in order
+  monthly_range / specific_month → rows as specified
 
-Output ONLY valid JSON matching this schema:
+values[] must contain exactly expected_count numbers (null for missing).
+For each value: cite row_label and col_label exactly as printed.
+
+TABLE FORMAT: pipe-delimited | row | val1 | val2 | ... — (123) = −123,
+"nan"/"-" = missing, "1,580 3/" = 1580 (ignore footnote markers).
+
+Output ONLY valid JSON:
 {
   "extractions": {
     "v1": {
-      "values": [132, 129, 143, 159, 154, 153, 177, 200, 219, 287, 376, 473],
-      "labels": ["1940-January", "February", "March", ...],
-      "row_labels": ["1940-January", "February", "March", ...],
+      "values": [132, 129, 143, ...],
+      "labels": ["1940-January", "February", ...],
+      "row_labels": ["1940-January", "February", ...],
       "col_labels": ["National defense", "National defense", ...],
       "source_file": "treasury_bulletin_1941_01.txt",
       "source_unit": "millions_usd",
@@ -1592,7 +1574,7 @@ def _llm_pick_rows(
         "Row labels:\n" + "\n".join(f"- {r}" for r in row_labels[:20])
     )
     try:
-        raw = llm(system_msg, user_msg, max_tokens=200)
+        raw = llm(system_msg, user_msg, max_tokens=1024)
         llm_counter["count"] += 1
         import re as _re
 
@@ -1754,7 +1736,10 @@ def extract_structured(
 
         per_request_budget = _dr_context_budget(dr, base_context_budget)
         _vt = 999 if _alt_render else 8
-        _mr = 150 if _alt_render else 80
+        # continuous_monthly DRs may span many years (e.g. 7 years × 12 =
+        # 84 rows). Use a larger cap so the full series is visible.
+        _gran = granularity if not _alt_render else granularity
+        _mr = 150 if _alt_render else (200 if _gran == "continuous_monthly" else 80)
         ctx = (
             build_context_from_entries(
                 entries,
@@ -1824,7 +1809,7 @@ def extract_structured(
             f"{len(data_requests)} data_requests (base budget {base_context_budget})"
         )
 
-    raw = llm(EXTRACT_STRUCTURED_SYSTEM, user_msg, max_tokens=2000)
+    raw = llm(EXTRACT_STRUCTURED_SYSTEM, user_msg, max_tokens=32768)
     if verbose:
         print(f"  LLM raw:\n{raw[:500]}")
 

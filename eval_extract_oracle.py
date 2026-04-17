@@ -36,6 +36,7 @@ from compute import format_result
 from extract import extract_structured  # noqa: E402
 from retrieve_v2 import _load_element_html  # noqa: E402
 from reward import score_answer  # noqa: E402
+from verify import auto_fix_fy_cy, auto_fix_units  # noqa: E402
 
 LEDGER = HERE / "ledger.sqlite"
 URL_PAGE_RE = re.compile(r"[?&]page=(\d+)")
@@ -56,7 +57,12 @@ def parse_gold_locs(row: dict) -> list[tuple[str, int]]:
 
 
 def build_oracle_entries(conn: sqlite3.Connection, gold_locs: list[tuple[str, int]]) -> list[dict]:
-    """Build retrieve_v2-shaped entries for the gold tables."""
+    """Build retrieve_v2-shaped entries for the gold tables.
+
+    When a gold page has no data tables (e.g. chart pages, prose-only pages),
+    falls back to prose passages from that page so the LLM can still attempt
+    extraction from narrative text.
+    """
     entries: list[dict] = []
     for file, page_id in gold_locs:
         rows = conn.execute(
@@ -71,6 +77,45 @@ def build_oracle_entries(conn: sqlite3.Connection, gold_locs: list[tuple[str, in
             """,
             (file, page_id),
         ).fetchall()
+        if not rows:
+            # No data tables on this page — try prose passages instead.
+            prose_rows = conn.execute(
+                """
+                SELECT id, file, element_seq, page_id, file_year, file_month,
+                       section, title, content
+                FROM prose
+                WHERE file = ? AND page_id = ?
+                ORDER BY element_seq
+                """,
+                (file, page_id),
+            ).fetchall()
+            for pr in prose_rows:
+                if not pr["content"]:
+                    continue
+                entries.append(
+                    {
+                        "file": pr["file"],
+                        "element_id": f"prose_{pr['id']}",
+                        "element_seq": pr["element_seq"],
+                        "page_id": pr["page_id"],
+                        "file_year": pr["file_year"],
+                        "file_month": pr["file_month"],
+                        "section": pr["section"] or "",
+                        "title": pr["title"] or "",
+                        "caption": "",
+                        "column_headers": [],
+                        "row_labels": [],
+                        "years": [],
+                        "unit": None,
+                        "period": None,
+                        "n_rows": 0,
+                        "n_cols": 0,
+                        "retrieval_strategy": "oracle_prose",
+                        "retrieval_channel": "oracle_prose",
+                        "html": None,
+                        "content": pr["content"],
+                    }
+                )
         for r in rows:
             cols = conn.execute(
                 "SELECT col_path FROM table_columns WHERE table_id = ? ORDER BY col_index",
@@ -188,15 +233,45 @@ def _process_uid(uid: str, row: dict, spec: dict | None) -> dict:
 
     try:
         raw_answer = compute_execute(spec, extracted)
+        # Determine source_unit for format_result: prefer extraction's
+        # normalized/reported unit over the ledger table's unit field.
+        # This handles cases where the table header is missing from the
+        # ledger but the LLM correctly identified the unit.
         src_unit = None
-        for e in oracle:
-            if e.get("unit"):
-                from compute import parse_unit
+        from compute import parse_unit
 
-                src_unit = parse_unit(e["unit"])
+        for ex_val in extracted.values():
+            if not isinstance(ex_val, dict):
+                continue
+            # unit_normalized_to: extraction was already scaled to this unit
+            nto = ex_val.get("unit_normalized_to")
+            if nto:
+                src_unit = nto
+                break
+            # source_unit: raw unit the LLM read from the table
+            su = ex_val.get("source_unit")
+            if su:
+                from extract import _canonical_unit  # noqa: PLC0415
+
+                src_unit = _canonical_unit(su)
                 if src_unit:
                     break
+        if src_unit is None:
+            for e in oracle:
+                if e.get("unit"):
+                    src_unit = parse_unit(e["unit"])
+                    if src_unit:
+                        break
         answer = format_result(raw_answer, spec.get("output_format", {}), src_unit)
+
+        # Deterministic post-compute fixes (no LLM call)
+        target_unit = (spec.get("output_format") or {}).get("unit")
+        unit_fix = auto_fix_units(str(answer), src_unit, target_unit)
+        if unit_fix:
+            answer = unit_fix["corrected"]
+
+        fy_cy_flag = auto_fix_fy_cy(spec, extracted)
+        # (FY/CY mismatch is flagged for diagnostic purposes; can't re-extract in oracle mode)
     except Exception as e:
         return {
             "uid": uid,
@@ -213,7 +288,7 @@ def _process_uid(uid: str, row: dict, spec: dict | None) -> dict:
         }
 
     gold = row.get("answer", "")
-    score = score_answer(gold, str(answer))
+    score = score_answer(gold, str(answer), tolerance=0.01)  # match solve.py's 1% tolerance
     return {
         "uid": uid,
         "outcome": "ok",
@@ -228,6 +303,7 @@ def _process_uid(uid: str, row: dict, spec: dict | None) -> dict:
         "extracted_dr_ids": list(extracted.keys()),
         "per_dr_trace": per_dr_trace,
         "missing_drs": missing_drs,
+        "fy_cy_flag": fy_cy_flag,
     }
 
 

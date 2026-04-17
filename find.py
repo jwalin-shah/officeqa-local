@@ -40,10 +40,9 @@ _client: OpenAI | None = None
 def _openai() -> OpenAI:
     global _client
     if _client is None:
-        _client = OpenAI(
-            api_key=os.getenv("DEDALUS_API_KEY"),
-            base_url=os.getenv("DEDALUS_API_BASE"),
-        )
+        from llm_client import client as _shared_client
+
+        _client = _shared_client
     return _client
 
 

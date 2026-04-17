@@ -11,6 +11,8 @@ dist/
 
 # --- Secrets / OS ---
 .env
+.env.local
+.envrc
 token.json
 .DS_Store
 

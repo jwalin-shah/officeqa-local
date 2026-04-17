@@ -7,35 +7,52 @@ Called by solve.py as pipeline step 1. Also importable standalone for eval_decom
 from __future__ import annotations
 
 import json
-import os
+import logging
 import re
-
-from dotenv import load_dotenv
-from openai import OpenAI
+import time
 
 from find import fetch_vocabulary
+from llm_client import MODEL, THINKING_EXTRA_BODY, client, rate_limiter, strip_thinking
 
-load_dotenv()
-
-MODEL = os.getenv("OFFICEQA_MODEL", "deepseek/deepseek-chat")
-
-client = OpenAI(
-    api_key=os.getenv("DEDALUS_API_KEY"),
-    base_url=os.getenv("DEDALUS_API_BASE"),
-)
+logger = logging.getLogger(__name__)
 
 
-def llm(system: str, user: str, max_tokens: int = 1000, temperature: float = 0.0) -> str:
-    resp = client.chat.completions.create(
-        model=MODEL,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
-    return resp.choices[0].message.content or ""
+def llm(system: str, user: str, max_tokens: int = 4096, temperature: float = 0.0) -> str:
+    """LLM call wrapper with rate limiting and retry/backoff.
+
+    Respects the module-level rate_limiter to enforce API rate limits.
+    Retries up to 3 times on rate limit errors (429, 5xx) with exponential backoff.
+    """
+    _MAX_RETRIES = 3
+    _RETRY_BASE = 5  # seconds
+    for attempt in range(_MAX_RETRIES):
+        try:
+            rate_limiter.acquire()  # wait for token before making API call
+            resp = client.chat.completions.create(
+                model=MODEL,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                extra_body=THINKING_EXTRA_BODY,
+            )
+            return strip_thinking(resp.choices[0].message.content or "")
+        except Exception as e:
+            err = str(e)
+            is_rate_limit = (
+                "429" in err or "504" in err or "502" in err or "503" in err
+                or "rate" in err.lower() or "too many" in err.lower()
+                or "timeout" in err.lower() or "gateway" in err.lower()
+            )
+            is_last = attempt == _MAX_RETRIES - 1
+            if is_rate_limit and not is_last:
+                delay = _RETRY_BASE * (2**attempt)
+                logger.warning("Decompose rate limit on attempt %d; retrying in %ds", attempt + 1, delay)
+                time.sleep(delay)
+                continue
+            raise
 
 
 def parse_json(raw: str) -> dict | None:
@@ -372,6 +389,31 @@ If the question asks for a list like [slope, intercept] or [val1, val2, val3]:
   python_template must end with: result = [a, b, ...]
 
 ═══════════════════════════════════════════════════════════════════════════════
+PRE-FLIGHT SELF-CHECK (do this before emitting JSON)
+═══════════════════════════════════════════════════════════════════════════════
+Before writing the JSON output, silently ask yourself:
+
+1. WHICH ROW? — Write out the exact row_hint you chose. Could any other row in
+   the table match? If yes, is the row_hint specific enough to exclude them?
+   (e.g. "National defense" vs "Total outlays — National defense and …")
+
+2. EMPTY DR GUARD — If any DR in my python_template had values=[], would the
+   template crash (index error, division by zero, empty list to stat function)?
+   If yes, redesign: use cohort mode, or add a fallback in the template.
+
+3. CROSS-REFERENCE CHECK — Does the question require knowing the answer to
+   sub-question A before I can formulate DR B? If so:
+   - If I can resolve A from domain knowledge → resolve it in resolution_notes,
+     hard-code the resolved value as row_hint in DR B.
+   - If I cannot resolve it without the corpus → use `cohort: true` on DR A
+     (fetch all candidates) and encode the selection logic in python_template
+     using argmax / argmin or a dict lookup. Never leave it as `computation: direct`
+     with a single DR that can't answer the question.
+
+4. UNIT COHERENCE — Does output_format.unit match what the question asks?
+   Will format_result correctly convert from the table's native unit?
+
+═══════════════════════════════════════════════════════════════════════════════
 OUTPUT — return ONLY this JSON schema, no prose
 ═══════════════════════════════════════════════════════════════════════════════
 {
@@ -706,7 +748,7 @@ def decompose(question: str, scout_hint: str = "", feedback: str = "") -> dict |
         )
     user_msg = "\n".join(user_parts)
 
-    raw = llm(DECOMPOSE_SYSTEM, user_msg, max_tokens=1500)
+    raw = llm(DECOMPOSE_SYSTEM, user_msg, max_tokens=3000)
     spec = parse_json(raw)
 
     def _is_valid(s: dict | None) -> bool:

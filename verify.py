@@ -16,22 +16,10 @@ LLM verify call to catch common mistakes without an extra round-trip.
 """
 
 import json
-import os
 import re
 
-from dotenv import load_dotenv  # type: ignore[import-untyped]
-from openai import OpenAI
-
 from compute import UNIT_MULTIPLIERS, parse_unit
-
-load_dotenv()
-
-MODEL = os.getenv("OFFICEQA_MODEL", "deepseek/deepseek-chat")
-client = OpenAI(
-    api_key=os.getenv("DEDALUS_API_KEY"),
-    base_url=os.getenv("DEDALUS_API_BASE"),
-)
-
+from llm_client import MODEL, THINKING_EXTRA_BODY, client, strip_thinking
 
 # Kept in sync with the EXTRACTION CHECKLIST in extract.py so both phases
 # reason from the same failure modes. Verify's wording is action-oriented
@@ -68,29 +56,27 @@ CHECKLIST = """Treasury Bulletin answer checklist:
 """
 
 
-VERIFY_SYSTEM = f"""You are a senior Treasury data analyst reviewing your
-intern's work. Be critical and thorough — your intern often makes mistakes
-with units, fiscal vs calendar year boundaries, and row/column selection.
-Check every detail.
+VERIFY_SYSTEM = f"""You are a collaborator double-checking a Treasury Bulletin
+answer before it is submitted. Your job is to catch real errors — not nitpick
+correct work. A false positive (flagging a good answer) is as harmful as
+missing a real one. When in doubt, trust the extraction and say ok=true.
 
 {CHECKLIST}
 
-You receive the question, the extracted values with citations, and the final
-computed answer that your intern produced. Check the answer against the
-checklist. Flag only real problems — do not second-guess correct work.
+Check the computed answer against the checklist above. If everything holds,
+say ok=true. If you see a genuine error, name it precisely and route the
+retry to the right phase.
 
 Output ONLY valid JSON:
 {{
   "ok": true|false,
-  "issue": "<short description of the problem, or null>",
+  "issue": "<short description, or null>",
   "suggested_phase": "extract"|"decompose"|"retrieve"|null
 }}
 
-Choose "extract" when the spec was right but the numbers are wrong (misread
-value, wrong column, wrong row, units mistake). Choose "decompose" when the
-interpretation itself is wrong (fiscal vs calendar confusion, wrong
-computation, missing data requests). Choose "retrieve" when the cited table
-title or section clearly describes the wrong topic — a retrieval error."""
+"extract"  — spec was right but wrong numbers (misread, wrong column, units)
+"decompose" — wrong interpretation (FY/CY confusion, wrong computation)
+"retrieve"  — cited table clearly describes the wrong topic"""
 
 
 # ── Deterministic auto-fixes (run before LLM verify) ─────────────────────────
@@ -369,8 +355,9 @@ def verify_answer(
                 {"role": "system", "content": VERIFY_SYSTEM},
                 {"role": "user", "content": user_msg},
             ],
+            extra_body=THINKING_EXTRA_BODY,
         )
-        raw = resp.choices[0].message.content or ""
+        raw = strip_thinking(resp.choices[0].message.content or "")
     except Exception as e:
         if verbose:
             print(f"  Verify LLM call failed: {e}")

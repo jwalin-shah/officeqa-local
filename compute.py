@@ -66,16 +66,35 @@ def parse_unit(raw: str | None) -> str | None:
     return None
 
 
+_DOLLAR_SCALE_UNITS = frozenset({"thousands", "millions", "billions"})
+
+
 def convert_unit(value, source_unit: str | None, target_unit: str | None):
     """Apply unit conversion when source and target units differ.
 
     Formula: converted = value * (source_multiplier / target_multiplier)
     E.g., source='thousands' (1e3) + target='millions' (1e6) → value / 1000.
 
-    Returns the value unchanged if either unit is None or they match.
+    Special case: target_unit=None with a dollar-scale source (thousands/millions/billions)
+    means the output format didn't specify a unit → treat target as raw (×1), so
+    values in thousands get ×1000 to reach raw dollars. Non-dollar units (percent,
+    index, count) are left unchanged when target is None.
+
     Applies element-wise to lists/tuples.
     """
-    if source_unit is None or target_unit is None:
+    if source_unit is None:
+        return value
+    if target_unit is None:
+        # Only expand dollar-scale units to raw when target is unspecified.
+        if source_unit not in _DOLLAR_SCALE_UNITS:
+            return value
+        src_mult = UNIT_MULTIPLIERS.get(source_unit)
+        if src_mult is None:
+            return value
+        if isinstance(value, (list, tuple)):
+            return [v * src_mult if isinstance(v, (int, float)) else v for v in value]
+        if isinstance(value, (int, float)):
+            return value * src_mult
         return value
     if source_unit == target_unit:
         return value
@@ -653,6 +672,9 @@ def execute(spec: dict, extractions: dict, verbose: bool = False):
         "cagr": lambda start, end, years: (
             (end / start) ** (1 / years) - 1 if start and start > 0 and years > 0 else 0.0
         ),
+        # Probability normalization — templates sometimes use p_norm(xs) to
+        # convert a list of counts/weights into probabilities summing to 1.
+        "p_norm": lambda xs: [x / sum(xs) for x in xs] if xs and sum(xs) != 0 else xs,
     }
 
     local_vars = {
@@ -670,9 +692,14 @@ def execute(spec: dict, extractions: dict, verbose: bool = False):
     # `v1[i]` instead of `values['v1'][i]`, and silently failing on the
     # name lookup would otherwise convert a valid extraction into a
     # compute error. `values` takes precedence for lookups that clash.
+    # Also expose `{dr_id}_labels` so templates can do argmax by label.
     for _did, _vs in values.items():
         if _did and _did not in local_vars:
             local_vars[_did] = _vs
+    for _did, _lbls in labels_by_id.items():
+        _lbl_key = f"{_did}_labels"
+        if _lbl_key not in local_vars:
+            local_vars[_lbl_key] = _lbls
 
     # CPI injection if needed
     if spec.get("cpi_needed"):
@@ -728,6 +755,24 @@ def execute(spec: dict, extractions: dict, verbose: bool = False):
 
     if verbose:
         print(f"  Executing template: {template}")
+
+    # Guard: detect empty DRs referenced in the template before exec so the
+    # error message names the missing DRs instead of crashing with opaque
+    # "list index out of range" or "KeyError" inside the sandbox.
+    _empty_referenced: list[str] = []
+    for _did, _vs in values.items():
+        if (
+            not _vs
+            and _did
+            and (
+                _did in template
+                or f"values['{_did}']" in template
+                or f'values["{_did}"]' in template
+            )
+        ):
+            _empty_referenced.append(_did)
+    if _empty_referenced:
+        raise ComputeError(f"template references DRs with no extracted values: {_empty_referenced}")
 
     try:
         exec(template, {"__builtins__": safe_builtins}, local_vars)  # nosec B102

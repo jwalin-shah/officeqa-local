@@ -8,7 +8,7 @@ All coding agents on this repo should read [AGENTS.md](AGENTS.md) first.
 
 Traversal defaults:
 - use `llm-tldr` for structure, symbol search, call graphs, and context gathering
-- use `rtk` for compact file reads, trees, grep, diff, pytest, and error output
+- use `rtk` for compact file reads, trees, grep, diff, pytest, and logs
 - fall back to raw `rg`, `sed`, `git`, `sqlite3`, or Python only when exact output is required
 
 ## Run it
@@ -54,7 +54,7 @@ Pipeline: scout → decompose → retrieve → [_try_deterministic_fast_path] �
 - `compute_template` — Python expression tree for final aggregation
 - output format specification
 
-**Retrieve phase** (deterministic): three-channel funnel with progressive synonym expansion over `ledger.sqlite`:
+**Retrieve phase** (deterministic): three-channel FTS + metric + prose/footnote funnel against `ledger.sqlite`:
 - **FTS channel** — FTS5 `tables_fts` over title/section/caption/columns/rows with year filtering. Good for topical/fuzzy questions.
 - **Metric channel** — substring lookup over `metrics.metric_slug` (normalized row label). Good when question's noun phrase matches a row label cleanly ("national defense" → exact slug hit). Mirrors arena's master_ledger retrieval.
 - **Prose/footnote channel** — supplementary context from `prose_fts` and `footnotes_fts` for ~6% of questions requiring non-table data. Weighted lower than direct table hits.
@@ -99,9 +99,12 @@ legacy fallback; prefer the JSON corpus for all new code.
 - `decompose.py` — LLM call 1: question → `QuestionSpec` (period, data_requests with retrieval hints, compute template, output format). Contains `DECOMPOSE_SYSTEM` prompt and all decompose helpers.
 - `retrieve_v2.py` — three-channel FTS + metric + prose/footnote funnel against `ledger.sqlite`. Progressive synonym expansion, period-aware reranking, strategy-weighted scoring, channel-preference routing from retrieval hints.
 - `find.py` — deterministic ledger lookups: `resolve_cells()`, bottom-up cell search, `try_deterministic_fast_path()` (tries to skip LLM extraction entirely), vocabulary fetch for decompose.
-- `extract.py` — LLM call 2: grounded per-request value extraction from retrieved tables. Pre-extraction helpers for monthly values and CY/FY row filtering. Quality retry, ledger cross-check, cohort filtering.
+- `extract.py` — LLM call 2: grounded per-request value extraction from retrieved context. Includes pre-extraction optimization for monthly values via `pre_extract_monthly_values()` and CY row filtering via `filter_cy_rows()` to disambiguate calendar vs fiscal year rows before LLM processing. Outputs structured values.
 - `compute.py` — safe Python evaluation of the compute template. Dispatches named operations (sum, average, percent_change, linear_regression, …). Unit conversion utilities.
 - `verify.py` — LLM call 3: post-compute answer check with deterministic auto-fixes for unit scaling and fiscal/calendar year errors.
+
+**Infrastructure:**
+- `llm_client.py` — centralized LLM client initialization. Multi-provider support: Dedalus DeepSeek default (`OFFICEQA_MODEL=deepseek-chat`, requires `DEDALUS_API_KEY`, `DEDALUS_API_BASE`). NVIDIA optional (takes priority when `NVIDIA_API_KEY` set; supports `minimaxai/minimax-m2.7` and other NVIDIA-hosted models). To switch: set `NVIDIA_API_KEY` and optionally override `OFFICEQA_MODEL`.
 
 **Data and scoring:**
 - `build_ledger.py` — builds `ledger.sqlite` from `corpus_json/`. Run once (or after corpus changes).
@@ -118,6 +121,7 @@ legacy fallback; prefer the JSON corpus for all new code.
 - `eval_attribution.py` — stage-attributed failure analysis (where does the pipeline break?).
 - `eval_bottomup.py` — measure bottom-up cell search recall.
 - `eval_direct_oracle.py` / `eval_extract_oracle.py` / `eval_hybrid_oracle.py` — oracle upper-bound evals for each stage.
+- `eval_extract_oracle_debug.py` — debug oracle extraction eval.
 - `eval_suite.py` — coordinated eval runner for commit-to-commit comparisons.
 - `batch_test.py` — parallel benchmark runner (wraps solve.py).
 - `compare_eval_runs.py` — diff two eval run JSONL files.
@@ -126,25 +130,36 @@ legacy fallback; prefer the JSON corpus for all new code.
 - `deep_dive_audit.py` — cross-phase diagnostic audit.
 - `validate_decompose.py` — structural sanity check on cached decompose specs.
 
-**Bench/validation scripts (root level):**
-- `test_solve.py` — smoke tests for pipeline entry points (no LLM calls).
-- `test_recall_with_decompose.py` — retrieval recall with pre-cached decompose specs.
-- `test_variants.py` — variant configuration testing.
-- `sql_solve.py` — SQL-based solver variant for exploring pure query-language approaches to question decomposition and retrieval.
+**Experimental/variant solver scripts:**
+- `sql_solve.py` — SQL-based solver variant exploring pure query-language approaches to question decomposition and retrieval.
+- `extract_sql.py` — SQL-based extraction variant.
+- `extract_with_tools.py` — extraction with tools variant.
+- `extract_simple.py` — simplified extraction variant.
+- `agent_extract.py` — agent-based extraction variant.
+- `oracle_solve.py` — oracle solver baseline variant.
+- `oracle_solve_fair.py` — fair oracle solver variant (minimal oracle surface area).
+- `oracle_solve_tools.py` — oracle solver with tool use.
+- `oracle_solve_verbose.py` — verbose oracle solver for diagnostics.
+- `oracle_extract_tools.py` — extraction oracle with tools.
+- `oracle_tools_bench.py` — oracle tools benchmarking suite.
+- `oracle_tools_bench_simple.py` — simplified oracle tools benchmarking.
+- `intern.py` — internship/experimental solver variant.
 
 **Migrations (already applied, in `scripts/migrations/`):**
-- `migrate_metrics_to_view.py`, `migrate_fill_column_years.py`, `migrate_propagate_year.py`
+- `migrate_metrics_to_view.py`, `migrate_fill_column_years.py`, `migrate_propagate_year.py`, `rebuild_family_tables.py`
 
 **Tests:**
 - `tests/conftest.py` — pytest fixtures for test setup.
 - `tests/test_build_ledger_row_year_propagate.py` — tests for ledger row year propagation logic.
+- `tests/test_extraction.py` — tests for extraction pipeline stages.
 - `tests/test_extract_quality_retry.py` — tests for extraction quality retry mechanisms.
+- `tests/test_verify.py` — tests for verify phase deterministic corrections.
 - `tests/test_attribution_eval.py` — tests for answer attribution evaluation.
 - `tests/test_retrieval_analysis.py` — tests for retrieval analysis diagnostics.
 - `scripts/setup_agents.py` — initialize agent infrastructure and standardize task specs.
 - `scripts/doctor_agents.py` — diagnostic tool to verify agent configuration and troubleshoot setup issues.
 - `scripts/setup_worktrees.sh` — create git worktrees in `.agent-worktrees/` for isolated agent stages.
-- `scripts/link_worktree_artifacts.sh` — symlink ledger.sqlite and decompose specs to worktrees.
+- `scripts/link_worktree_artifacts.sh` — symlink ledger.sqlite and cached decompose to worktrees.
 - `scripts/refresh_worktrees_from_main.sh` — refresh existing worktrees with latest code from main branch.
 - `scripts/agent_iterate.sh` — drive iterative agent rounds across worktrees (supports DRY_RUN=1).
 - `scripts/agent_task_specs/` — task specifications (decompose.txt, eval.txt, extract.txt, fastpath.txt, ingest.txt, retrieval.txt) for siloed agent stages; used by agent invocation harness.
@@ -164,8 +179,7 @@ legacy fallback; prefer the JSON corpus for all new code.
 Historical arena code has been removed from the repo (was `archive_from_arena/`, removed 2026-04-11 as part of repo cleanup). If you need to reference it, `git log --all --full-history -- archive_from_arena/` will find the last commit that contained it.
 
 ## Key conventions
-- LLM: OpenAI client library with DeepSeek via Dedalus (OpenAI-compatible endpoint). Model via
-  `OFFICEQA_MODEL` env var (defaults to `deepseek/deepseek-chat`). API config in `.env`.
+- **LLM providers**: OpenAI-compatible API via `llm_client.py`. Default: Dedalus DeepSeek (`OFFICEQA_MODEL=deepseek-chat`, requires `DEDALUS_API_KEY`, `DEDALUS_API_BASE`). NVIDIA optional (takes priority when `NVIDIA_API_KEY` set; supports `minimaxai/minimax-m2.7` and other NVIDIA-hosted models). To switch: set `NVIDIA_API_KEY` and optionally override `OFFICEQA_MODEL`.
 - **Always test retrieval without the live LLM decompose call.** Use `retrieve_from_question()`
   or `decompose_eval.full.jsonl` (pre-cached specs). Never put an LLM call in the inner loop of a benchmark
   sweep — it turns 5-second tests into 5-minute tests and mixes decompose noise into
